@@ -175,8 +175,6 @@
 !
 ! ARGUMENTS:
 !     neighbourhood   - a computed array of computed neighbourhoods, organised by (COL,ROW)
-!     w               - number of columns (width) in array
-!     h               - number of rows (height) in array
 !
 ! CALLS:
 !
@@ -192,7 +190,7 @@
 !
 !S-
 !------------------------------------------------------------------------------
-SUBROUTINE show_neighbourhood_stats(neighbourhood,w,h,title)
+SUBROUTINE show_neighbourhood_stats(neighbourhood, title)
   USE SLSTR_Preprocessor
   IMPLICIT NONE
 
@@ -200,7 +198,6 @@ SUBROUTINE show_neighbourhood_stats(neighbourhood,w,h,title)
   ! Arguments
   ! -----------
   TYPE(NEIGHBOURHOOD_MAP), INTENT(IN) :: neighbourhood
-  INTEGER, INTENT(IN) :: w, h
   CHARACTER(LEN=*), INTENT(IN) :: title
 
   ! ---------------
@@ -214,7 +211,6 @@ SUBROUTINE show_neighbourhood_stats(neighbourhood,w,h,title)
   INTEGER :: i
   INTEGER :: main_count_a, orphan_count_a, main_count_b, orphan_count_b, null_count
   INTEGER :: source
-  LOGICAL :: check_sorted_by_distance
 
   main_count_a = 0
   orphan_count_a = 0
@@ -233,7 +229,7 @@ SUBROUTINE show_neighbourhood_stats(neighbourhood,w,h,title)
   DO row=1,rows
     DO col=1,cols
       sqdist=0
-      DO k=1,k_nearest_neighbours
+      DO k=1,MAX_K_NEAREST_NEIGHBOURS
         source = neighbourhood%entries(col,row)%source(k)
         if (source == ORPHAN_PIXEL_SOURCE_A .or. source == ORPHAN_PIXEL_SOURCE_B) THEN
           IF (source == ORPHAN_PIXEL_SOURCE_A) THEN
@@ -290,7 +286,7 @@ SUBROUTINE show_neighbourhood_stats(neighbourhood,w,h,title)
           END IF
           sqdist = neighbourhood%entries(col,row)%squared_distances(k)
 
-          IF (sqdist > max_dist*max_dist) THEN
+          IF (sqdist > MAX_NEIGHBOUR_DISTANCE*MAX_NEIGHBOUR_DISTANCE) THEN
             PRINT *, 'ERROR - distances in neighbourhood exceeds maximum'
             STOP
           END IF
@@ -424,22 +420,22 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats)
       ELSE
         PRINT *, 'Oblique View'
       END IF
-      PRINT *, 'neighbourhood size', k_nearest_neighbours
-      PRINT *, 'max_distance', max_dist
+      PRINT *, 'max neighbourhood size', MAX_K_NEAREST_NEIGHBOURS
+      PRINT *, 'max distance (m)', MAX_NEIGHBOUR_DISTANCE
     END IF
     CALL compute_scene_neighbourhood(view_type,scene_folder,neighbourhood_a,'a')
     IF (stats) THEN
-      CALL show_neighbourhood_stats(neighbourhood_a,ir_width,ir_height, &
+      CALL show_neighbourhood_stats(neighbourhood_a, &
               'Neighbourhood A stats - view='//view_type)
     END IF
     CALL compute_scene_neighbourhood(view_type,scene_folder,neighbourhood_ab,'b')
     IF (stats) THEN
-      CALL show_neighbourhood_stats(neighbourhood_ab,ir_width,ir_height, &
+      CALL show_neighbourhood_stats(neighbourhood_ab, &
               'Neighbourhood B stats - view='//view_type)
     END IF
     CALL merge_neighbourhoods(neighbourhood_a,neighbourhood_ab)
     IF (stats) THEN
-      CALL show_neighbourhood_stats(neighbourhood_ab,ir_width,ir_height, &
+      CALL show_neighbourhood_stats(neighbourhood_ab, &
               'Neighbourhood A+B stats - view='//view_type)
     END IF
   END IF
@@ -455,10 +451,10 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats)
     DO function_index = 1,4
       IF (band > 3) THEN
         CALL process_scene_band(view_type,scene_folder,band,vis_output_radiance, &
-                neighbourhood_ab,functions(function_index))
+                neighbourhood_ab,10,functions(function_index))
       ELSE
         CALL process_scene_band(view_type,scene_folder,band,vis_output_radiance, &
-                neighbourhood_a,functions(function_index))
+                neighbourhood_a,5,functions(function_index))
       END IF
       vis_output_radiances(:,:,function_index) = vis_output_radiance
     END DO
@@ -490,7 +486,7 @@ PROGRAM Preprocess_SLSTR
   CALL GET_COMMAND_ARGUMENT(2,output_folder)
   CALL GET_COMMAND_ARGUMENT(3,option)
   MISSING_R = -1.0e+30
-  MISSING_I = -32768
+  MAX_NEIGHBOUR_DISTANCE = 10000
   IF (TRIM(option) == 'simple') THEN
     simple = .true.
   END IF

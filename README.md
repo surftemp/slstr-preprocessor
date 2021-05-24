@@ -43,19 +43,20 @@ CALL compute_scene_neighbourhood('n','/path/to/scene',neighbourhood,'a')
 
 ! Process visual band 4 from the nadir view, using the constructed neighbourhood mapping, and applying the mean function
 ! Possible functions are represented by module constants FUNCTION_MEAN, FUNCTION_MAX, FUNCTION_MIN_MAX_DIFF, FUNCTION_SD
-! vis_output_radiance is a 2D array pre-allocated to receive the output
+! vis_output_radiance is a 2D array pre-allocated to receive the output.  Use the 5 nearest neighbours.
 ! use width=1500,height=1200 for nadir view
 ! use width=900,height=1200 for oblique view
 REAL, ALLOCATABLE, DIMENSION(:,:) :: vis_output_radiance
 ALLOCATE(vis_output_radiance(1500,1200))
-CALL process_scene_band('n','/path/to/scene',4,vis_output_radiance,neighbourhood,FUNCTION_MEAN)
+CALL process_scene_band('n','/path/to/scene',4,vis_output_radiance,neighbourhood,5,FUNCTION_MEAN)
 
 ! Process further bands from the same scene and nadir view, by calling process_scene_band further times
 
-! To process the scene band without using neighbourhood map (using old behaviour) omit the optional neighbourhood
+! To process the scene band without using neighbourhood map (using old behaviour) do not build the neighbourhood 
+TYPE(NEIGHBOURHOOD_MAP) :: empty_neighbourhood
 REAL, ALLOCATABLE, DIMENSION(:,:) :: vis_output_radiance
 ALLOCATE(vis_output_radiance(1500,1200))
-CALL process_scene_band('n','/path/to/scene',4,vis_output_radiance)
+CALL process_scene_band('n','/path/to/scene',4,vis_output_radiance,empty_neighbourhood,0,FUNCTION_MEAN)
 ```
 
 In the example above, a neighbourhood was constructed on the pixels in the a-stripe.  A neighbourhood can similarly be constructed on the b-stripe:
