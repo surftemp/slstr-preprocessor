@@ -103,7 +103,7 @@ MODULE SLSTR_Preprocessor
   LOGICAL :: align_cosmetic_pixels = .false.
 
   !> Maximum neighbourhood size.
-  INTEGER, PARAMETER :: MAX_K_NEAREST_NEIGHBOURS = 10
+  INTEGER, PARAMETER :: MAX_K_NEAREST_NEIGHBOURS = 15
 
   !> Mask to use to check if a pixel is comsmetically filled, in flags_ao.nc/flags_an.nc
   INTEGER, PARAMETER :: COSMETIC_PIXEL_MASK = 256      ! Identify COSMETIC pixels with these bits flagged

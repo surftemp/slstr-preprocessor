@@ -13,10 +13,10 @@ Fortran library code and test driver program for aggregating visual channels in 
   the neighbourhood of each IR pixel, using the specified aggregation function(s).
 
   * If no suitable pixels appear in the neighbourhood, a missing value is used
-  * MEAN, MAX, SD and MAX-MIN aggregations are supported and other ones can easily be added
+  * MEAN, MAX, SD (population standard deviation) and MAX-MIN aggregations are supported and other ones can easily be added
     
 * For comparison purposes, a `simple` mode is provided which ignores the along and across track distances and aggregates the visible
-  band value for an IR pixel at indexes (x,y) by simply taking the mean of the 4 visible bands at indexes (2x,2y),(2x+1,2y),(2x,2y+1),(2x+1,2y+1)
+  band value for an IR pixel at indexes (x,y) by agggregating the 4 visible pixels at indexes (2x,2y),(2x+1,2y),(2x,2y+1),(2x+1,2y+1)
   
 This software processes L1 scenes from the Sentinel 3A/3B SLSTR satellites as described here:
 
@@ -31,10 +31,13 @@ Usage of this module can be described by the following code snippet:
 ```
 USE slstr_preprocessor
 
-! The module variables MISSING_R and MISSING_I must first be set to represent missing values in array data returned by the module
+! The module variable MISSING_R must first be set to represent missing values in array data returned by the module
 ! For example:
 MISSING_R = -1.0e+30
-MISSING_I = -32768
+
+! The module variable MAX_NEIGHBOUR_DISTANCE (defaults to 10000) - sets the maximum distance in metres a VIS pixel can lie from the IR pixel center to be included in the neighbourhood calculation
+! For example:
+MAX_NEIGHBOUR_DISTANCE = 5000 
 
 ! Declare variable to hold the neighbourhood, the array will be allocated inside the compute_scene_neighbourhood
 TYPE(NEIGHBOURHOOD_MAP), ALLOCATABLE, DIMENSION(:,:) :: neighbourhood
@@ -43,7 +46,7 @@ CALL compute_scene_neighbourhood('n','/path/to/scene',neighbourhood,'a')
 
 ! Process visual band 4 from the nadir view, using the constructed neighbourhood mapping, and applying the mean function
 ! Possible functions are represented by module constants FUNCTION_MEAN, FUNCTION_MAX, FUNCTION_MIN_MAX_DIFF, FUNCTION_SD
-! vis_output_radiance is a 2D array pre-allocated to receive the output.  Use the 5 nearest neighbours.
+! vis_output_radiance is a 2D array pre-allocated to receive the output.  Use up to the 5 nearest neighbours.
 ! use width=1500,height=1200 for nadir view
 ! use width=900,height=1200 for oblique view
 REAL, ALLOCATABLE, DIMENSION(:,:) :: vis_output_radiance
@@ -52,7 +55,8 @@ CALL process_scene_band('n','/path/to/scene',4,vis_output_radiance,neighbourhood
 
 ! Process further bands from the same scene and nadir view, by calling process_scene_band further times
 
-! To process the scene band without using neighbourhood map (using old behaviour) do not build the neighbourhood 
+! To process the scene band without using neighbourhood map (using the simple method) do not build the neighbourhood 
+! The simple method agggregates pixels at location (2x,2y),(2x+1,2y),(2x,2y+1),(2x+1,2y+1)
 TYPE(NEIGHBOURHOOD_MAP) :: empty_neighbourhood
 REAL, ALLOCATABLE, DIMENSION(:,:) :: vis_output_radiance
 ALLOCATE(vis_output_radiance(1500,1200))
@@ -65,7 +69,7 @@ In the example above, a neighbourhood was constructed on the pixels in the a-str
 CALL compute_scene_neighbourhood('n','/path/to/scene',neighbourhood,'b')
 ```
 
-It is also possible to create a combined neighbourhood that includes the closest pixels drawn from both the a- and b-stripes, using the merge_neighborhoods subroutine:
+It is also possible to create a combined neighbourhood that includes the closest pixels drawn from both the a- and b-stripes, using the `merge_neighborhoods` subroutine:
 
 ```
 TYPE(NEIGHBOURHOOD_MAP), ALLOCATABLE, DIMENSION(:,:) :: neighbourhood_a
@@ -78,13 +82,13 @@ CALL merge_neighbourhoods(neighbourhood_a,neighbourhood_ab)  ! the combined a/b 
 Note that the behaviour of `process_scene_band` using a neighbourhood which includes b-stripe data will raise an error and cause the program to stop,
 when called for a visible channel which does not include a b-stripe in the input data.
 
-## Customising options
+## Customising compile time options
 
 Edit the module parameters of [fortran integration module](SLSTR_Preprocessor.f90) to customise its behaviour
 
-The two commonly modified parameters are
+The most commonly used parameter sets the maximum limit on the number of neighbours that can used (the `effective_k` parameter passed to `process_scene_band`)
 
-* k_nearest_neighbours (defaults to 10) - controls how many neighbours (at most) will be aggegrated to compute an output pixel
+* MAX_K_NEAREST_NEIGHBOURS (defaults to 10) - controls how many neighbours at most can be aggegrated to compute an output pixel
 
 ```
 !> Neighbourhood size for searching a neighbourhood with both a and b stripes.
@@ -92,12 +96,6 @@ The two commonly modified parameters are
 INTEGER, PARAMETER :: k_nearest_neighbours = 10
 ```
 
-* max_dist (defaults to 10000) - sets the maximum distance in metres a VIS pixel can lie from the IR pixel center to be included in the neighbourhood calculation
-  
-```
-!> Exclude neighbours further away than this (metres)
-REAL, PARAMETER :: max_dist = 10000.0
-```
 
 ## Building and running the code and test program
 
@@ -123,7 +121,7 @@ and specify the output folder into which the output files S*_radiance_in.nc and 
 unzip S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_187_3420_LN2_O_NT_003.zip
 ```
 
-* run with neighbourhood calculation:
+* run with neighbourhood calculation, output files to /tmp:
 
 ```
 ./Preprocess_SLSTR S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_187_3420_LN2_O_NT_003.SEN3 /tmp
@@ -132,13 +130,19 @@ unzip S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_1
 * run without neighbourhood calculation (old behaviour):
 
 ```
-./Preprocess_SLSTR path/to/data/S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_187_3420_LN2_O_NT_003.SEN3 /tmp simple
+./Preprocess_SLSTR path/to/data/S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_187_3420_LN2_O_NT_003.SEN3 /tmp --simple
 ```
 
-* run with neighbourhood calculation and print basic statistics:
+* run with neighbourhood calculation and print basic neighbourhood statistics:
 
 ```
-./Preprocess_SLSTR path/to/data/S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_187_3420_LN2_O_NT_003.SEN3 /tmp stats
+./Preprocess_SLSTR path/to/data/S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_187_3420_LN2_O_NT_003.SEN3 /tmp --stats
+```
+
+* run with neighbourhood calculation, using K=6 and setting the maximum distance of a neighbour to 4000m:
+
+```
+./Preprocess_SLSTR path/to/data/S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_187_3420_LN2_O_NT_003.SEN3 /tmp --effective_k 6 --max_distance 4000
 ```
 
 ## Output files and variables
@@ -155,5 +159,5 @@ For example, in `S1_radiance_in.nc` the following variables will be created:
 * `S1_radiance_max` - value is the maximum pixel value within the neighbourhood
 * `S1_radiance_mean` - value is the mean pixel value within the neighbourhood
 * `S1_radiance_min_max_diff` - value is the difference between the max and min values within the neighbourhood
-* `S1_radiance_sd` - value is the standard deviation of values in the neighbourhood
+* `S1_radiance_sd` - value is the population standard deviation of values in the neighbourhood
 

@@ -360,7 +360,7 @@ END SUBROUTINE show_neighbourhood_stats
 !
 !S-
 !------------------------------------------------------------------------------
-SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats)
+SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, effective_k)
   USE SLSTR_Preprocessor
   USE GbcsPath
   USE netcdf
@@ -373,6 +373,7 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats)
   CHARACTER(LEN=*), INTENT(IN) :: scene_folder
   CHARACTER(LEN=*), INTENT(IN) :: output_folder
   LOGICAL, INTENT(IN) :: simple, stats
+  INTEGER, INTENT(IN) :: effective_k
 
   ! ---------------
   ! Local Variables
@@ -421,6 +422,7 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats)
         PRINT *, 'Oblique View'
       END IF
       PRINT *, 'max neighbourhood size', MAX_K_NEAREST_NEIGHBOURS
+      PRINT *, 'effective neighbourhood size', effective_k
       PRINT *, 'max distance (m)', MAX_NEIGHBOUR_DISTANCE
     END IF
     CALL compute_scene_neighbourhood(view_type,scene_folder,neighbourhood_a,'a')
@@ -450,11 +452,13 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats)
 
     DO function_index = 1,4
       IF (band > 3) THEN
+        ! bands 4,5,6 should have data avaialble for both a and b stripes
         CALL process_scene_band(view_type,scene_folder,band,vis_output_radiance, &
-                neighbourhood_ab,10,functions(function_index))
+                neighbourhood_ab,effective_k,functions(function_index))
       ELSE
+        ! bands 3,4,5 may only have the a stripe
         CALL process_scene_band(view_type,scene_folder,band,vis_output_radiance, &
-                neighbourhood_a,5,functions(function_index))
+                neighbourhood_a,effective_k,functions(function_index))
       END IF
       vis_output_radiances(:,:,function_index) = vis_output_radiance
     END DO
@@ -477,22 +481,54 @@ PROGRAM Preprocess_SLSTR
   ! ---------------
   CHARACTER(256) :: scene_folder
   CHARACTER(256) :: output_folder
-  CHARACTER(256) :: option
 
+  CHARACTER(256) :: option
+  CHARACTER(256) :: option_value
+
+  INTEGER :: effective_k, i, max_distance
   LOGICAL :: simple, stats
   simple = .false.
   stats = .false.
+  effective_k = MAX_K_NEAREST_NEIGHBOURS
+  max_distance = 10000
+
   CALL GET_COMMAND_ARGUMENT(1,scene_folder)
   CALL GET_COMMAND_ARGUMENT(2,output_folder)
-  CALL GET_COMMAND_ARGUMENT(3,option)
+
+  i = 3
+  DO WHILE (.true.)
+    CALL GET_COMMAND_ARGUMENT(i,option)
+    i = i + 1
+    IF (option == '') THEN
+      EXIT
+    END IF
+    IF (option == '--simple') THEN
+      simple = .true.
+    END IF
+    IF (option == '--stats') THEN
+      stats = .true.
+    END IF
+    IF (option == '--effective_k') THEN
+      CALL GET_COMMAND_ARGUMENT(i,option_value)
+      IF (option_Value == '') THEN
+        EXIT
+      END IF
+      i = i + 1
+      READ(option_value,'(I3.1)') effective_k
+    END IF
+    IF (option == '--max_distance') THEN
+      CALL GET_COMMAND_ARGUMENT(i,option_value)
+      IF (option_Value == '') THEN
+        EXIT
+      END IF
+      i = i + 1
+      READ(option_value,'(I6.1)') max_distance
+    END IF
+  END DO
+
   MISSING_R = -1.0e+30
-  MAX_NEIGHBOUR_DISTANCE = 10000
-  IF (TRIM(option) == 'simple') THEN
-    simple = .true.
-  END IF
-  IF (TRIM(option) == 'stats') THEN
-    stats = .true.
-  END IF
-  CALL process_view('n',scene_folder,output_folder,simple,stats)
-  CALL process_view('o',scene_folder,output_folder,simple,stats)
+  MAX_NEIGHBOUR_DISTANCE = max_distance
+
+  CALL process_view('n',scene_folder,output_folder,simple,stats,effective_k)
+  CALL process_view('o',scene_folder,output_folder,simple,stats,effective_k)
 END PROGRAM Preprocess_SLSTR
