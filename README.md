@@ -93,7 +93,7 @@ The most commonly used parameter sets the maximum limit on the number of neighbo
 ```
 !> Neighbourhood size for searching a neighbourhood with both a and b stripes.
 !> If only searching one stripe, the neighbourhood size is half this value
-INTEGER, PARAMETER :: k_nearest_neighbours = 10
+INTEGER, PARAMETER :: MAX_K_NEAREST_NEIGHBOURS = 10
 ```
 
 
@@ -108,7 +108,10 @@ make clean
 make
 ```
 
-This should build an executable `Preprocess_SLSTR` in the current folder.  
+This should build an executable `Preprocess_SLSTR` in the current folder.  The Makefile expects:
+
+* gfortran to be installed
+* netcdf fortran libraries (libnetcdff) installed to /usr/local/lib abd /usr/local/include
 
 ## Running the module via the test program Preprocess_SLSTR
 
