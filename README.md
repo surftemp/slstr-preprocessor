@@ -4,7 +4,7 @@ Fortran library code and test driver program for aggregating visual channels in 
 
 * The preprocessor works by first computing a neighbourhood of visual pixels in a scene that are closest to each IR pixel
   
-  * Neighbourhoods are defined using the N nearest neighbours that lie within a maximum radius
+  * Neighbourhoods are defined using the K nearest neighbours that lie within a maximum radius
   * Cartesian distances are used, based on along-track and across-track offsets of each pixel
   * Cosmetically filled pixels are ignored to avoid making a double contribution to the output
   * Choose from using the a-stripe or (where available) the b-stripe or a combination of a-stripe and b-stripe
@@ -35,7 +35,8 @@ USE slstr_preprocessor
 ! For example:
 MISSING_R = -1.0e+30
 
-! The module variable MAX_NEIGHBOUR_DISTANCE (defaults to 10000) - sets the maximum distance in metres a VIS pixel can lie from the IR pixel center to be included in the neighbourhood calculation
+! The module variable MAX_NEIGHBOUR_DISTANCE (defaults to 10000) - sets the maximum distance in metres a VIS pixel 
+! can lie from the IR pixel center to be included in the neighbourhood calculation
 ! For example:
 MAX_NEIGHBOUR_DISTANCE = 5000 
 
@@ -69,7 +70,8 @@ In the example above, a neighbourhood was constructed on the pixels in the a-str
 CALL compute_scene_neighbourhood('n','/path/to/scene',neighbourhood,'b')
 ```
 
-It is also possible to create a combined neighbourhood that includes the closest pixels drawn from both the a- and b-stripes, using the `merge_neighborhoods` subroutine:
+It is also possible to create a combined neighbourhood that includes the closest pixels drawn from both the a- and b-stripes, 
+using the `merge_neighborhoods` subroutine:
 
 ```
 TYPE(NEIGHBOURHOOD_MAP), ALLOCATABLE, DIMENSION(:,:) :: neighbourhood_a
@@ -88,20 +90,18 @@ Edit the module parameters of [fortran integration module](SLSTR_Preprocessor.f9
 
 The most commonly used parameter sets the maximum limit on the number of neighbours that can used (the `effective_k` parameter passed to `process_scene_band`)
 
-* MAX_K_NEAREST_NEIGHBOURS (defaults to 10) - controls how many neighbours at most can be aggegrated to compute an output pixel
+* MAX_K_NEAREST_NEIGHBOURS (defaults to 10) - controls how many neighbours (K) at most can be aggegrated to compute an output pixel
 
 ```
-!> Neighbourhood size for searching a neighbourhood with both a and b stripes.
-!> If only searching one stripe, the neighbourhood size is half this value
+!> Maximum neighbourhood size.
 INTEGER, PARAMETER :: MAX_K_NEAREST_NEIGHBOURS = 10
 ```
 
-
-## Building and running the code and test program
+## Building the code and test program
 
 A [standalone test program Preprocess_SLSTR](Preprocess_SLSTR.f90) which can be linked with this module is also provided.
 
-To build the test program clone this repo and then use:
+To build the test program clone this repo, cd into its root directory and then run:
 
 ```
 make clean
@@ -111,14 +111,14 @@ make
 This should build an executable `Preprocess_SLSTR` in the current folder.  The Makefile expects:
 
 * gfortran to be installed
-* netcdf fortran libraries (libnetcdff) installed to /usr/local/lib abd /usr/local/include
+* netcdf fortran libraries (libnetcdff) installed to `/usr/local/lib` (libraries) and `/usr/local/include` (headers)
 
 ## Running the module via the test program Preprocess_SLSTR
 
 To run the test program, supply the input folder containing an SLSTR scene 
 and specify the output folder into which the output files S*_radiance_in.nc and S*radiance_io.nc are written.
 
-* first, unzip the scene if zipped
+* first, unzip the scene if zipped.  In the example below, the file is unzipped into the folder containing the Preprocess_SLSTR executable.
 
 ```
 unzip S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_187_3420_LN2_O_NT_003.zip
@@ -133,19 +133,22 @@ unzip S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_1
 * run without neighbourhood calculation (old behaviour):
 
 ```
-./Preprocess_SLSTR path/to/data/S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_187_3420_LN2_O_NT_003.SEN3 /tmp --simple
+./Preprocess_SLSTR S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_187_3420_LN2_O_NT_003.SEN3 /tmp 
+         --simple
 ```
 
 * run with neighbourhood calculation and print basic neighbourhood statistics:
 
 ```
-./Preprocess_SLSTR path/to/data/S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_187_3420_LN2_O_NT_003.SEN3 /tmp --stats
+./Preprocess_SLSTR S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_187_3420_LN2_O_NT_003.SEN3 /tmp 
+         --stats
 ```
 
 * run with neighbourhood calculation, using K=6 and setting the maximum distance of a neighbour to 4000m:
 
 ```
-./Preprocess_SLSTR path/to/data/S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_187_3420_LN2_O_NT_003.SEN3 /tmp --effective_k 6 --max_distance 4000
+./Preprocess_SLSTR S3A_SL_1_RBT____20200101T235811_20200102T000111_20200103T033745_0179_053_187_3420_LN2_O_NT_003.SEN3 /tmp 
+          --effective_k 6 --max_distance 4000
 ```
 
 ## Output files and variables
