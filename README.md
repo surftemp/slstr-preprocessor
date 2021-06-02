@@ -28,7 +28,7 @@ A [fortran integration module](SLSTR_Preprocessor.f90) should be linked with a c
 
 Usage of this module can be described by the following code snippet:
 
-```
+```f90
 USE slstr_preprocessor
 
 ! The module variable MISSING_R must first be set to represent missing values in array data returned by the module
@@ -66,14 +66,14 @@ CALL process_scene_band('n','/path/to/scene',4,vis_output_radiance,empty_neighbo
 
 In the example above, a neighbourhood was constructed on the pixels in the a-stripe.  A neighbourhood can similarly be constructed on the b-stripe:
 
-```
+```f90
 CALL compute_scene_neighbourhood('n','/path/to/scene',neighbourhood,'b')
 ```
 
 It is also possible to create a combined neighbourhood that includes the closest pixels drawn from both the a- and b-stripes, 
 using the `merge_neighborhoods` subroutine:
 
-```
+```f90
 TYPE(NEIGHBOURHOOD_MAP), ALLOCATABLE, DIMENSION(:,:) :: neighbourhood_a
 TYPE(NEIGHBOURHOOD_MAP), ALLOCATABLE, DIMENSION(:,:) :: neighbourhood_ab
 CALL compute_scene_neighbourhood('n','/path/to/scene',neighbourhood_a,'a')
@@ -92,7 +92,7 @@ The most commonly used parameter sets the maximum limit on the number of neighbo
 
 * MAX_K_NEAREST_NEIGHBOURS (defaults to 10) - controls how many neighbours (K) at most can be aggegrated to compute an output pixel
 
-```
+```f90
 !> Maximum neighbourhood size.
 INTEGER, PARAMETER :: MAX_K_NEAREST_NEIGHBOURS = 10
 ```
