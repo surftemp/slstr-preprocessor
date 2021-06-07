@@ -496,33 +496,30 @@ PROGRAM Preprocess_SLSTR
   CALL GET_COMMAND_ARGUMENT(2,output_folder)
 
   i = 3
-  DO WHILE (.true.)
+  DO WHILE (i <= COMMAND_ARGUMENT_COUNT())
     CALL GET_COMMAND_ARGUMENT(i,option)
     i = i + 1
-    IF (option == '') THEN
-      EXIT
-    END IF
     IF (option == '--simple') THEN
       simple = .true.
-    END IF
-    IF (option == '--stats') THEN
+    ELSE IF (option == '--stats') THEN
       stats = .true.
-    END IF
-    IF (option == '--effective_k') THEN
+    ELSE IF (option == '--effective_k') THEN
       CALL GET_COMMAND_ARGUMENT(i,option_value)
       IF (option_Value == '') THEN
         EXIT
       END IF
       i = i + 1
       READ(option_value,'(I3.1)') effective_k
-    END IF
-    IF (option == '--max_distance') THEN
+    ELSE IF (option == '--max_distance') THEN
       CALL GET_COMMAND_ARGUMENT(i,option_value)
       IF (option_Value == '') THEN
         EXIT
       END IF
       i = i + 1
       READ(option_value,'(I6.1)') max_distance
+    ELSE
+      PRINT *, 'Unknown option ', option
+      STOP
     END IF
   END DO
 
