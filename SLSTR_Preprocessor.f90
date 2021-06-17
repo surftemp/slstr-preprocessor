@@ -99,6 +99,9 @@ MODULE SLSTR_Preprocessor
   ! Module parameters
   ! -----------------
 
+  !> Whether to use a new faster neighbourhood building algorithm
+  LOGICAL :: use_new_neighbourhood_algorithm = .true.
+
   !> Whether to perform extra computation to process cosmetically filled IR pixels the same as the original pixels
   LOGICAL :: align_cosmetic_pixels = .false.
 
@@ -141,6 +144,9 @@ MODULE SLSTR_Preprocessor
   !> Constant representing the max-min function
   INTEGER, PARAMETER :: FUNCTION_MIN_MAX_DIFF = 4
 
+  !> Bucket capacity for new intermediate data bucket lookup structure
+  INTEGER, PARAMETER :: BUCKET_CAPACITY = 20
+
   ! -------------
   ! Derived Types
   ! -------------
@@ -181,6 +187,27 @@ MODULE SLSTR_Preprocessor
     REAL, ALLOCATABLE, DIMENSION(:,:) :: ycoords
     INTEGER :: valid_orphan_width
   END TYPE ORPHAN_LOCATIONS
+
+    !> Define a structure to hold a bucket of visible pixel locations
+  TYPE BUCKET_ENTRY
+    REAL, DIMENSION(BUCKET_CAPACITY) :: xcoords
+    REAL, DIMENSION(BUCKET_CAPACITY) :: ycoords
+    INTEGER, DIMENSION(BUCKET_CAPACITY) :: xindices
+    INTEGER, DIMENSION(BUCKET_CAPACITY) :: yindices
+    INTEGER, DIMENSION(BUCKET_CAPACITY) :: confidences
+    LOGICAL, DIMENSION(BUCKET_CAPACITY) :: is_orphan
+    INTEGER :: allocated
+  END TYPE BUCKET_ENTRY
+
+  TYPE BUCKET_LOOKUP
+    TYPE(BUCKET_ENTRY), ALLOCATABLE, DIMENSION(:,:) :: buckets
+    REAL :: min_x
+    REAL :: max_x
+    REAL :: min_y
+    REAL :: max_y
+    INTEGER :: height
+    INTEGER :: width
+  END TYPE BUCKET_LOOKUP
 
 CONTAINS
 !------------------------------------------------------------------------------
@@ -823,6 +850,335 @@ CONTAINS
     END DO
   END SUBROUTINE build_neighbourhood_map
 
+  !------------------------------------------------------------------------------
+!S+
+! NAME:
+!       find_neighbours_new
+!
+! PURPOSE:
+!>      Find the closest radiance band pixels to a specific IR band pixel using faster bucket lookup
+!
+! CATEGORY:
+!
+! LANGUAGE:
+!       Fortran-95
+!
+! CALLING SEQUENCE:
+!       CALL find_neighbours_new(ir_x_index, ir_y_index, ir_x, ir_y, &
+!                            lookup, neighborhood)
+!
+! ARGUMENTS:
+!>@ARG{ir_x_index, in, INTEGER} the column of the IR pixel
+!>@ARG{ir_y_index, in, INTEGER} the row of the IR pixel
+!>@ARG{ir_x, in, REAL} across track distance of the IR pixel
+!>@ARG{ir_y, in, REAL} along track distance of the IR pixel
+!>@ARG{lookup, in, BUCKET_LOOKUP} intermediate data bucket lookup structure
+!>@ARG{neighborhood, inout, NEIGHBOURHOOD_ENTRY} the neighbourhood map that is being constructed
+!>@ARG{stripe, in, CHARACTER(1)} the stripe which the cartesian data represents, 'a' or 'b'
+!
+! CALLS:
+!       insert_neighbour
+!
+! SIDE EFFECTS:
+!       None
+!
+! RESTRICTIONS:
+!
+! PROCEDURE:
+!
+! CREATION HISTORY:
+!     23/10/20  NM  Creation
+!     06/11/20  NM  Refactor after code review with CB,AW,OE
+!S-
+!------------------------------------------------------------------------------
+  PURE SUBROUTINE find_neighbours_new(ir_x_index, ir_y_index, ir_x, ir_y, &
+                                  lookup, neighbourhood, stripe)
+    IMPLICIT NONE
+    ! ---------
+    ! Arguments
+    ! ---------
+    INTEGER,                   INTENT(in)    :: ir_x_index
+    INTEGER,                   INTENT(in)    :: ir_y_index
+    REAL,                      INTENT(in)    :: ir_x
+    REAL,                      INTENT(in)    :: ir_y
+    TYPE(BUCKET_LOOKUP),       INTENT(in)    :: lookup
+    TYPE(NEIGHBOURHOOD_ENTRY), INTENT(inout) :: neighbourhood
+    CHARACTER(1),              INTENT(in)    :: stripe
+
+    ! ---------------
+    ! Local Variables
+    ! ---------------
+    INTEGER :: vis_x_min_index, vis_x_max_index, vis_y_min_index, vis_y_max_index
+    REAL :: max_dist_sq
+    INTEGER :: main_source, orphan_source
+
+    INTEGER :: elem, line, bucket_index
+    INTEGER :: assigned
+    REAL :: v, scale_x, scale_y
+
+    IF (stripe == 'a') THEN
+      main_source = MAIN_PIXEL_SOURCE_A
+      orphan_source = ORPHAN_PIXEL_SOURCE_A
+    ELSE
+      main_source = MAIN_PIXEL_SOURCE_B
+      orphan_source = ORPHAN_PIXEL_SOURCE_B
+    END IF
+
+    ! Start with an empty neighbourhood and array of minimum values
+    neighbourhood%x = INVALID_PIXEL_INDEX
+    neighbourhood%y = INVALID_PIXEL_INDEX
+    neighbourhood%source = NULL_PIXEL_SOURCE
+    neighbourhood%squared_distances = 0
+
+    ! if the across or along track distances of the IR pixel are missing, set all neighbours to missing and
+    ! return immediately
+    IF (ir_x == MISSING_R .or. ir_y == MISSING_R) THEN
+      RETURN
+    ENDIF
+
+    ! Compute the threshold for squared distances - neighbours must be closer than this
+    max_dist_sq = MAX_NEIGHBOUR_DISTANCE**2
+
+    ! work out the region in the intermediate lookup grid where valid neighbours are stored
+
+    scale_x = lookup%width / (lookup%max_x-lookup%min_x)
+    scale_y = lookup%height / (lookup%max_y-lookup%min_y)
+
+    vis_x_min_index = FLOOR((ir_x-lookup%min_x)*scale_x)-CEILING(MAX_NEIGHBOUR_DISTANCE/(lookup%max_x-lookup%min_x))
+    vis_x_max_index = CEILING((ir_x-lookup%min_x)*scale_x)+CEILING(MAX_NEIGHBOUR_DISTANCE/(lookup%max_x-lookup%min_x))
+
+    vis_y_min_index = FLOOR((ir_y-lookup%min_y)*scale_y)-CEILING(MAX_NEIGHBOUR_DISTANCE/(lookup%max_y-lookup%min_y))
+    vis_y_max_index = CEILING((ir_y-lookup%min_y)*scale_y)+CEILING(MAX_NEIGHBOUR_DISTANCE/(lookup%max_y-lookup%min_y))
+
+    ! clip to the dimensions of the lookup grid
+    IF (vis_x_min_index < 1) THEN
+      vis_x_min_index = 1
+    END IF
+    IF (vis_x_max_index > lookup%width) THEN
+      vis_x_max_index = lookup%width
+    END IF
+
+    IF (vis_y_min_index < 1) THEN
+      vis_y_min_index = 1
+    END IF
+    IF (vis_y_max_index > lookup%height) THEN
+      vis_y_max_index = lookup%height
+    END IF
+
+    assigned = 0
+
+    ! iterate over the area in the lookup grid where all neighbours will be found and build an ordered list of the closest K
+    ! values in the neighborhood structure
+    DO line = vis_y_min_index, vis_y_max_index
+      ! main pixel array
+      DO elem = vis_x_min_index, vis_x_max_index
+
+        DO bucket_index = 1, BUCKET_CAPACITY
+          IF (bucket_index > lookup%buckets(line,elem)%allocated) THEN
+            EXIT
+          END IF
+
+          v = (lookup%buckets(line,elem)%xcoords(bucket_index) - ir_x) ** 2 + &
+                  (lookup%buckets(line,elem)%ycoords(bucket_index) - ir_y) ** 2
+
+          IF (v >= max_dist_sq) CYCLE   ! ignore if the squared distance is too far away
+          IF (lookup%buckets(line,elem)%is_orphan(bucket_index)) THEN
+            CALL insert_neighbour(neighbourhood, assigned, v, orphan_source, &
+                lookup%buckets(line,elem)%xindices(bucket_index), lookup%buckets(line,elem)%yindices(bucket_index))
+          ELSE
+            ! ignore cosmetically filled pixels
+            IF (IAND(lookup%buckets(line,elem)%confidences(bucket_index), COSMETIC_PIXEL_MASK) /= 0) CYCLE
+            CALL insert_neighbour(neighbourhood, assigned, v, main_source, &
+                lookup%buckets(line,elem)%xindices(bucket_index), lookup%buckets(line,elem)%yindices(bucket_index))
+          END IF
+        END DO
+      END DO
+    END DO
+
+  END SUBROUTINE find_neighbours_new
+
+  !------------------------------------------------------------------------------
+!S+
+! NAME:
+!       build_neighbourhood_map_new
+!
+! PURPOSE:
+!>      Find the K closest radiance band pixels to a every IR band pixel and store
+!>      the resulting mapping in a neighbourhood map.  Considers main and orphan
+!>      band pixels.  New version using faster bucket lookup instead of search window.
+!
+! CATEGORY:
+!
+! LANGUAGE:
+!       Fortran-95
+!
+! CALLING SEQUENCE:
+!       CALL build_neighbourhood_map_new(ir_cartesian, main_cartesian, orphan_cartesian, neighborhood)
+!
+! ARGUMENTS:
+!>@ARG{ir_cartesian, in, IR_LOCATIONS} ir main pixel locations
+!>@ARG{main_cartesian, in, MAIN_LOCATIONS} visible main pixel locations and confidences
+!>@ARG{orphan_cartesian, inout, ORPHAN_LOCATIONS} visble orphan pixel locations
+!>@ARG{neighborhood, inout, NEIGHBOURHOOD_ENTRY} the neighbourhood map that is being constructed
+!>@ARG{stripe, in, CHARACTER(1)} the stripe which the cartesian data represents, 'a' or 'b'
+!
+! CALLS:
+!       find_neighbours_new
+!
+! SIDE EFFECTS:
+!       None
+!
+! RESTRICTIONS:
+!
+! PROCEDURE:
+!
+! CREATION HISTORY:
+!     23/10/20  NM  Creation
+!     06/11/20  NM  Refactor after code review with CB,AW,OE
+  !     06/11/20  NM  Refactor after code review with CB,AW,OE
+!S-
+!------------------------------------------------------------------------------
+  SUBROUTINE build_neighbourhood_map_new(ir_cartesian, main_cartesian, orphan_cartesian, &
+                                          neighbourhood, stripe)
+    IMPLICIT NONE
+    ! ---------
+    ! Arguments
+    ! ---------
+    TYPE(IR_LOCATIONS),      INTENT(in)    :: ir_cartesian
+    TYPE(MAIN_LOCATIONS),    INTENT(in)    :: main_cartesian
+    TYPE(ORPHAN_LOCATIONS),  INTENT(inout) :: orphan_cartesian
+    TYPE(NEIGHBOURHOOD_MAP), INTENT(inout) :: neighbourhood
+    CHARACTER(1),            INTENT(in)    :: stripe
+
+    ! ---------------
+    ! Local Variables
+    ! ---------------
+    INTEGER :: orphan_y, orphan_x
+    INTEGER :: ir_x, ir_y, vis_x, vis_y, b_x, b_y
+    REAL :: v_x, v_y
+    REAL :: scale_x, scale_y
+    INTEGER :: visible_width, visible_height, ir_width, ir_height, orphan_width, orphan_height
+    REAL x_max, x_min, y_max, y_min
+    LOGICAL, ALLOCATABLE, DIMENSION(:,:) :: vis_mask
+    TYPE(BUCKET_ENTRY) :: bucket
+    TYPE(BUCKET_LOOKUP) :: lookup
+
+    visible_width = SIZE(main_cartesian%xcoords,1)
+    visible_height = SIZE(main_cartesian%xcoords,2)
+    ir_width = SIZE(ir_cartesian%xcoords,1)
+    ir_height = SIZE(ir_cartesian%xcoords,2)
+    orphan_width = SIZE(orphan_cartesian%xcoords,1)
+    orphan_height = visible_height
+
+    lookup%max_x = MAXVAL(main_cartesian%xcoords)
+    lookup%min_x = MINVAL(main_cartesian%xcoords,mask=main_cartesian%xcoords /= MISSING_R)
+
+    lookup%max_y = MAXVAL(main_cartesian%ycoords)
+    lookup%min_y = MINVAL(main_cartesian%ycoords,mask=main_cartesian%ycoords /= MISSING_R)
+
+    lookup%height = 2000
+    lookup%width = 2000
+
+    ALLOCATE(lookup%buckets(lookup%height,lookup%width))
+    lookup%buckets%allocated = 0
+
+    scale_x = lookup%width / (lookup%max_x-lookup%min_x)
+    scale_y = lookup%height / (lookup%max_y-lookup%min_y)
+
+    DO vis_y = 1,visible_height
+      DO vis_x = 1,visible_width
+        v_x = main_cartesian%xcoords(vis_x,vis_y)
+        IF (v_x == MISSING_R) THEN
+          CYCLE
+        END IF
+        v_y = main_cartesian%ycoords(vis_x,vis_y)
+        IF (v_y == MISSING_R) THEN
+          CYCLE
+        END IF
+        b_x = NINT((v_x - lookup%min_x) * scale_x)
+        b_y = NINT((v_y - lookup%min_y) * scale_y)
+        IF (b_x < 1) THEN
+          b_x = 1
+        END IF
+        IF (b_x > lookup%width) THEN
+          b_x = lookup%width
+        END IF
+
+        b_y = NINT((v_y - lookup%min_y) * scale_y)
+        IF (b_y < 1) THEN
+          b_y = 1
+        END IF
+        IF (b_y > lookup%height) THEN
+          b_y = lookup%height
+        END IF
+        IF (lookup%buckets(b_y,b_x)%allocated == BUCKET_CAPACITY) THEN
+          ! no space left in the lookup cell to store another visible pixel, increase BUCKET_CAPACITY should help
+          PRINT *, 'ERROR overflow in build_neighbourhood_map'
+          STOP
+        END IF
+        lookup%buckets(b_y,b_x)%allocated = lookup%buckets(b_y,b_x)%allocated + 1
+        lookup%buckets(b_y,b_x)%xcoords(lookup%buckets(b_y,b_x)%allocated) = v_x
+        lookup%buckets(b_y,b_x)%ycoords(lookup%buckets(b_y,b_x)%allocated) = v_y
+        lookup%buckets(b_y,b_x)%xindices(lookup%buckets(b_y,b_x)%allocated) = vis_x
+        lookup%buckets(b_y,b_x)%yindices(lookup%buckets(b_y,b_x)%allocated) = vis_y
+        lookup%buckets(b_y,b_x)%is_orphan(lookup%buckets(b_y,b_x)%allocated) = .false.
+        lookup%buckets(b_y,b_x)%confidences(lookup%buckets(b_y,b_x)%allocated) = main_cartesian%confidence(vis_x,vis_y)
+
+      END DO
+    END DO
+
+    DO orphan_y = 1,orphan_height
+      DO orphan_x = 1,orphan_width
+        v_x = orphan_cartesian%xcoords(orphan_x,orphan_y)
+        IF (v_x == MISSING_R) THEN
+          CYCLE
+        END IF
+        v_y = orphan_cartesian%ycoords(orphan_x,orphan_y)
+        IF (v_y == MISSING_R) THEN
+          CYCLE
+        END IF
+        b_x = NINT((v_x - lookup%min_x) * scale_x)
+        IF (b_x < 1) THEN
+          b_x = 1
+        END IF
+        IF (b_x > lookup%width) THEN
+          b_x = lookup%width
+        END IF
+
+        b_y = NINT((v_y - lookup%min_y) * scale_y)
+        IF (b_y < 1) THEN
+          b_y = 1
+        END IF
+        IF (b_y > lookup%height) THEN
+          b_y = lookup%height
+        END IF
+
+        IF (lookup%buckets(b_y,b_x)%allocated == BUCKET_CAPACITY) THEN
+          ! no space left in the lookup cell to store another visible pixel, increase BUCKET_CAPACITY should help
+          PRINT *, 'ERROR overflow in build_neighbourhood_map'
+          STOP
+        END IF
+        lookup%buckets(b_y,b_x)%allocated = lookup%buckets(b_y,b_x)%allocated + 1
+        lookup%buckets(b_y,b_x)%xcoords(lookup%buckets(b_y,b_x)%allocated) = v_x
+        lookup%buckets(b_y,b_x)%ycoords(lookup%buckets(b_y,b_x)%allocated) = v_y
+        lookup%buckets(b_y,b_x)%xindices(lookup%buckets(b_y,b_x)%allocated) = orphan_x
+        lookup%buckets(b_y,b_x)%yindices(lookup%buckets(b_y,b_x)%allocated) = orphan_y
+        lookup%buckets(b_y,b_x)%is_orphan(lookup%buckets(b_y,b_x)%allocated) = .true.
+        lookup%buckets(b_y,b_x)%confidences(lookup%buckets(b_y,b_x)%allocated) = 0
+
+      END DO
+    END DO
+
+    ! Now loop over each IR pixel location and find its neighbours
+    DO ir_y = 1,ir_height
+      DO ir_x = 1,ir_width
+        v_x = ir_cartesian%xcoords(ir_x,ir_y)
+        v_y = ir_cartesian%ycoords(ir_x,ir_y)
+        CALL find_neighbours_new(ir_x,ir_y,v_x,v_y,lookup,neighbourhood%entries(ir_x,ir_y),stripe)
+      END DO
+    END DO
+  END SUBROUTINE build_neighbourhood_map_new
+
 
 !------------------------------------------------------------------------------
 !F+
@@ -1167,39 +1523,34 @@ CONTAINS
     ! ---------------
     ! Local Variables
     ! ---------------
-    INTEGER rad_ncid, visible_width, visible_height, orphan_width, status
-    CHARACTER(256) :: orphan_radiance_field_name, radiance_field_name, exception_field_name
-    CHARACTER(1) :: band_str
+    INTEGER :: ncid, dimid, status
+    INTEGER :: width, height, orphans
+    CHARACTER(40) :: orphan_name, radiance_name, exception_name
 
-    WRITE(band_str,'(I1)') band
+
+    WRITE(radiance_name, '("S",I1,"_radiance_",A1,A1)') band, stripe, view_type
+    WRITE(orphan_name, '("S",I1,"_radiance_orphan_",A1,A1)') band, stripe, view_type
+    WRITE(exception_name, '("S",I1,"_exception_",A1,A1)') band, stripe, view_type
+
+    ncid = safe_open(Path_Join(scene_folder, TRIM(radiance_name)//'.nc'))
 
     ! Work out the sizes of the arrays
-    visible_height = 2400
-    IF (view_type == 'n') THEN
-      ! nadir view
-      visible_width = 3000
-      orphan_width = 374
-    ELSE
-      ! oblique view
-      visible_width = 1800
-      orphan_width = 224
-    END IF
+    status = nf90_inq_dimid(ncid, 'columns', dimid)
+    status = nf90_inquire_dimension(ncid, dimid, LEN=width)
+    status = nf90_inq_dimid(ncid, 'rows', dimid)
+    status = nf90_inquire_dimension(ncid, dimid, LEN=height)
+    status = nf90_inq_dimid(ncid, 'orphan_pixels', dimid)
+    status = nf90_inquire_dimension(ncid, dimid, LEN=orphans)
 
-    ALLOCATE(vis_radiance(1:visible_width,1:visible_height))
-    ALLOCATE(vis_orphans(1:orphan_width,1:visible_height))
-    ALLOCATE(vis_exception(1:visible_width,1:visible_height))
+    ALLOCATE(vis_radiance(width, height), &
+             vis_orphans(orphans, height), &
+             vis_exception(width, height))
 
-    WRITE(radiance_field_name, '("S",I1,"_radiance_",A1,A1)') band, stripe,view_type
-    rad_ncid = safe_open(Path_Join(scene_folder,'S'//band_str//'_radiance_'//stripe//view_type//'.nc'))
-    CALL safe_get_real_data(rad_ncid,TRIM(radiance_field_name),vis_radiance,MISSING_R)
+    CALL safe_get_real_data(ncid, TRIM(radiance_name), vis_radiance, MISSING_R)
+    CALL safe_get_real_data(ncid, TRIM(orphan_name), vis_orphans, MISSING_R)
+    CALL safe_get_int_data(ncid, TRIM(exception_name), vis_exception, MISSING_I)
+    status = nf90_close(ncid)
 
-    WRITE(orphan_radiance_field_name, '("S",I1,"_radiance_orphan_",A1,A1)') band, stripe, view_type
-    CALL safe_get_real_data(rad_ncid,TRIM(orphan_radiance_field_name),vis_orphans,MISSING_R)
-
-    WRITE(exception_field_name, '("S",I1,"_exception_",A1,A1)') band, stripe, view_type
-    CALL safe_get_int_data(rad_ncid,TRIM(exception_field_name),vis_exception,MISSING_I)
-
-    status = nf90_close(rad_ncid)
   END SUBROUTINE load_radiance_data
 
 
@@ -1587,7 +1938,7 @@ CONTAINS
     ! Local Variables
     ! ---------------
     INTEGER :: status
-    INTEGER :: vis_ncid, flags_ncid, ir_ncid, iflags_ncid, s8_bt_ncid
+    INTEGER :: vis_ncid, flags_ncid, ir_ncid, iflags_ncid, s8_bt_ncid, dimid
     INTEGER :: visible_width, visible_height, ir_width, ir_height, orphan_width
 
     ! Create data structures to hold the x- and y- 2D arrays for the IR and main / orphan pixels
@@ -1598,23 +1949,7 @@ CONTAINS
     REAL, ALLOCATABLE, DIMENSION(:,:) :: s8_bt
     INTEGER :: ix, iy
 
-    ! Work out the sizes of the arrays
-    visible_height = 2400
-    ir_height = 1200
-    IF (view_type == 'n') THEN
-      ! nadir view
-      visible_width = 3000
-      ir_width = 1500
-      orphan_width = 374
-    ELSE
-      ! oblique view
-      visible_width = 1800
-      ir_width = 900
-      orphan_width = 224
-    END IF
 
-    ! Allocate the arrays for each data structure
-    ALLOCATE(neighbourhood%entries(ir_width,ir_height))
     IF (stripe == 'a') THEN
       neighbourhood%include_a_stripe = .true.
       neighbourhood%include_b_stripe = .false.
@@ -1623,21 +1958,34 @@ CONTAINS
       neighbourhood%include_b_stripe = .true.
     END IF
 
-    ALLOCATE(ir_cartesian%xcoords(ir_width,ir_height))
-    ALLOCATE(ir_cartesian%ycoords(ir_width,ir_height))
+    vis_ncid = safe_open(Path_Join(scene_folder, 'cartesian_'//stripe//view_type//'.nc'))
+    ir_ncid = safe_open(Path_Join(scene_folder, 'cartesian_i'//view_type//'.nc'))
+    flags_ncid = safe_open(Path_Join(scene_folder, 'flags_'//stripe//view_type//'.nc'))
 
-    ALLOCATE(main_cartesian%xcoords(visible_width,visible_height))
-    ALLOCATE(main_cartesian%ycoords(visible_width,visible_height))
-    ALLOCATE(main_cartesian%confidence(visible_width,visible_height))
+    ! Work out the sizes of the arrays
+    status = nf90_inq_dimid(vis_ncid, 'columns', dimid)
+    status = nf90_inquire_dimension(vis_ncid, dimid, LEN=visible_width)
+    status = nf90_inq_dimid(vis_ncid, 'rows', dimid)
+    status = nf90_inquire_dimension(vis_ncid, dimid, LEN=visible_height)
+    status = nf90_inq_dimid(vis_ncid, 'orphan_pixels', dimid)
+    status = nf90_inquire_dimension(vis_ncid, dimid, LEN=orphan_width)
 
-    ALLOCATE(orphan_cartesian%xcoords(orphan_width,visible_height))
-    ALLOCATE(orphan_cartesian%ycoords(orphan_width,visible_height))
+    status = nf90_inq_dimid(ir_ncid, 'columns', dimid)
+    status = nf90_inquire_dimension(ir_ncid, dimid, LEN=ir_width)
+    status = nf90_inq_dimid(ir_ncid, 'rows', dimid)
+    status = nf90_inquire_dimension(ir_ncid, dimid, LEN=ir_height)
 
-    ! Load the cartesian coordinates arrays and flags from the scene
-    vis_ncid = safe_open(Path_Join(scene_folder,'cartesian_'//stripe//view_type//'.nc'))
-    ir_ncid = safe_open(Path_Join(scene_folder,'cartesian_i'//view_type//'.nc'))
-    flags_ncid = safe_open(Path_Join(scene_folder,'flags_'//stripe//view_type//'.nc'))
+    ! Allocate the arrays for each data structure
+    ALLOCATE(neighbourhood%entries(ir_width,ir_height), &
+             ir_cartesian%xcoords(ir_width,ir_height), &
+             ir_cartesian%ycoords(ir_width,ir_height), &
+             main_cartesian%xcoords(visible_width,visible_height), &
+             main_cartesian%ycoords(visible_width,visible_height), &
+             main_cartesian%confidence(visible_width,visible_height), &
+             orphan_cartesian%xcoords(orphan_width,visible_height), &
+             orphan_cartesian%ycoords(orphan_width,visible_height))
 
+   ! Load the cartesian coordinates arrays and flags from the scene
     CALL safe_get_real_data(vis_ncid,'x_'//stripe//view_type,main_cartesian%xcoords, MISSING_R)
     CALL safe_get_real_data(vis_ncid,'y_'//stripe//view_type,main_cartesian%ycoords, MISSING_R)
     CALL safe_get_int_data(flags_ncid,'confidence_'//stripe//view_type,main_cartesian%confidence, MISSING_I)
@@ -1668,7 +2016,11 @@ CONTAINS
     status = nf90_close(vis_ncid)
 
     ! Now build the neighbourhood, using the loaded cartesian data
-    CALL build_neighbourhood_map(ir_cartesian,main_cartesian,orphan_cartesian,neighbourhood,stripe)
+    IF (use_new_neighbourhood_algorithm) THEN
+      CALL build_neighbourhood_map_new(ir_cartesian,main_cartesian,orphan_cartesian,neighbourhood,stripe)
+    ELSE
+      CALL build_neighbourhood_map(ir_cartesian,main_cartesian,orphan_cartesian,neighbourhood,stripe)
+    END IF
   END SUBROUTINE compute_scene_neighbourhood
 
 END MODULE SLSTR_Preprocessor

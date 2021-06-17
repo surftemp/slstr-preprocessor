@@ -208,9 +208,11 @@ SUBROUTINE show_neighbourhood_stats(neighbourhood, title)
   INTEGER :: row, col, k, rows, cols, x_index, y_index
   INTEGER, DIMENSION(10) :: distance_distribution
   INTEGER, DIMENSION(10) :: distance_distribution_orphan
-  INTEGER :: i
+  INTEGER, DIMENSION(4) :: window_shrink_stats_x, window_shrink_stats_y
+  INTEGER :: i, shrink
   INTEGER :: main_count_a, orphan_count_a, main_count_b, orphan_count_b, null_count
   INTEGER :: source
+  INTEGER :: y_min_index, y_max_index, x_min_index, x_max_index
 
   main_count_a = 0
   orphan_count_a = 0
@@ -221,6 +223,8 @@ SUBROUTINE show_neighbourhood_stats(neighbourhood, title)
   distance_distribution_orphan(:) = 0
   distance_gt_10 = 0
   distance_gt_10_orphan = 0
+  window_shrink_stats_x(:) = 0
+  window_shrink_stats_y(:) = 0
 
   cols = SIZE(neighbourhood%entries,1)
   rows = SIZE(neighbourhood%entries,2)
@@ -266,29 +270,53 @@ SUBROUTINE show_neighbourhood_stats(neighbourhood, title)
         if (source == NULL_PIXEL_SOURCE) THEN
           null_count = null_count + 1
         ELSE
-          ! run integrity checks
-          x_index = neighbourhood%entries(col,row)%x(k)
-          y_index = neighbourhood%entries(col,row)%y(k)
-          IF (x_index < 1 .or. x_index > 2*cols) THEN
-            PRINT *, 'ERROR - x index in neighbourhood is out of bounds'
-            STOP
-          END IF
-          IF (y_index < 1 .or. y_index > 2*rows) THEN
-            PRINT *, 'ERROR - y index in neighbourhood is out of bounds'
-            STOP
-          END IF
+          ! run integrity checks.  do the neighbourhhod pixels lie in the expected search window?
+          IF (.false.) THEN
+            x_index = neighbourhood%entries(col,row)%x(k)
+            y_index = neighbourhood%entries(col,row)%y(k)
 
-          ! values at each entry should be ordered by increasing squared distance, check this
-          IF (sqdist > neighbourhood%entries(col,row)%squared_distances(k)) THEN
-            PRINT *, 'ERROR - distances in neighbourhood are out of order'
-            PRINT *, neighbourhood%entries(col,row)%squared_distances
-            STOP
-          END IF
-          sqdist = neighbourhood%entries(col,row)%squared_distances(k)
+            y_min_index = MAX(2*row - search_height,1)
+            y_max_index = MIN(2*row + search_height, 2*rows)
+            x_min_index = 1
+            x_max_index = cols*2
 
-          IF (sqdist > MAX_NEIGHBOUR_DISTANCE*MAX_NEIGHBOUR_DISTANCE) THEN
-            PRINT *, 'ERROR - distances in neighbourhood exceeds maximum'
-            STOP
+            IF (source == MAIN_PIXEL_SOURCE_A .or. source == MAIN_PIXEL_SOURCE_B) THEN
+              x_min_index = MAX(2*col - search_width, 1)
+              x_max_index = MIN(2*col + search_width, 2*cols)
+            END IF
+
+            IF (x_index < x_min_index .or. x_index > x_max_index) THEN
+              PRINT *, 'ERROR - x index in neighbourhood is out of bounds'
+              PRINT *, x_index
+              STOP
+            END IF
+            IF (y_index < y_min_index .or. y_index > y_max_index) THEN
+              PRINT *, 'ERROR - y index in neighbourhood is out of bounds'
+              PRINT *, y_index
+              STOP
+            END IF
+
+            DO shrink = 1,4
+              IF (x_index < (x_min_index+shrink) .or. x_index > (x_max_index-shrink)) THEN
+                window_shrink_stats_x(shrink) = window_shrink_stats_x(shrink)+1
+              END IF
+              IF (y_index < (y_min_index+shrink) .or. y_index > (y_max_index-shrink)) THEN
+                window_shrink_stats_y(shrink) = window_shrink_stats_y(shrink)+1
+              END IF
+            END DO
+
+            ! values at each entry should be ordered by increasing squared distance, check this
+            IF (sqdist > neighbourhood%entries(col,row)%squared_distances(k)) THEN
+              PRINT *, 'ERROR - distances in neighbourhood are out of order'
+              PRINT *, neighbourhood%entries(col,row)%squared_distances
+              STOP
+            END IF
+            sqdist = neighbourhood%entries(col,row)%squared_distances(k)
+
+            IF (sqdist > MAX_NEIGHBOUR_DISTANCE*MAX_NEIGHBOUR_DISTANCE) THEN
+              PRINT *, 'ERROR - distances in neighbourhood exceeds maximum'
+              STOP
+            END IF
           END IF
         END IF
       END DO
@@ -302,6 +330,11 @@ SUBROUTINE show_neighbourhood_stats(neighbourhood, title)
   PRINT *, 'ORPHAN PIXELS USED(A)=', orphan_count_a
   PRINT *, 'ORPHAN PIXELS USED(B)=', orphan_count_b
   PRINT *, '  NULL PIXELS USED   =', null_count
+  PRINT *, ''
+  PRINT *, 'SHRINKAGE STATS'
+  DO i=1,4
+    PRINT *, i, window_shrink_stats_x(i), window_shrink_stats_y(i)
+  END DO
   PRINT *, ''
   PRINT *, 'MAIN PIXEL LOCATION DISTRIBUTION OF DISTANCES FROM EXPECTED'
   DO i=1,10
@@ -390,6 +423,10 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, e
   INTEGER, DIMENSION(4) :: functions
   CHARACTER(16), DIMENSION(4) :: function_names
 
+  REAL :: start_time, end_time, elapsed_time
+
+  CALL cpu_time(start_time)
+
   functions(1) = FUNCTION_MEAN
   function_names(1) = 'mean'
 
@@ -469,7 +506,16 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, e
 
     CALL safe_write_out(Path_Join(output_folder,'S'//band_str//'_radiance_i'//view_type//'.nc'), &
       output_field_name,ir_width,ir_height,4,vis_output_radiances,fill_value,function_names)
+
   END DO
+  CALL cpu_time(end_time)
+    elapsed_time = end_time - start_time
+
+    IF (view_type == 'n') THEN
+      PRINT *, 'Nadir View processing CPU time (secs) ', elapsed_time
+    ELSE
+      PRINT *, 'Oblique View processing CPU time (secs) ', elapsed_time
+    END IF
 END SUBROUTINE process_view
 
 PROGRAM Preprocess_SLSTR
@@ -485,12 +531,15 @@ PROGRAM Preprocess_SLSTR
   CHARACTER(256) :: option
   CHARACTER(256) :: option_value
 
-  INTEGER :: effective_k, i, max_distance
+  INTEGER :: effective_k, i, max_distance, window_height, window_width
   LOGICAL :: simple, stats
+
   simple = .false.
   stats = .false.
   effective_k = MAX_K_NEAREST_NEIGHBOURS
   max_distance = 10000
+  window_height = 0
+  window_width = 0
 
   CALL GET_COMMAND_ARGUMENT(1,scene_folder)
   CALL GET_COMMAND_ARGUMENT(2,output_folder)
@@ -510,6 +559,20 @@ PROGRAM Preprocess_SLSTR
       END IF
       i = i + 1
       READ(option_value,'(I3.1)') effective_k
+    ELSE IF (option == '--window_height') THEN
+      CALL GET_COMMAND_ARGUMENT(i,option_value)
+      IF (option_Value == '') THEN
+        EXIT
+      END IF
+      i = i + 1
+      READ(option_value,'(I3.1)') window_height
+    ELSE IF (option == '--window_width') THEN
+      CALL GET_COMMAND_ARGUMENT(i,option_value)
+      IF (option_Value == '') THEN
+        EXIT
+      END IF
+      i = i + 1
+      READ(option_value,'(I3.1)') window_width
     ELSE IF (option == '--max_distance') THEN
       CALL GET_COMMAND_ARGUMENT(i,option_value)
       IF (option_Value == '') THEN
@@ -525,6 +588,12 @@ PROGRAM Preprocess_SLSTR
 
   MISSING_R = -1.0e+30
   MAX_NEIGHBOUR_DISTANCE = max_distance
+  IF (window_height > 0) THEN
+    search_height = window_height
+  END IF
+  IF (window_width > 0) THEN
+    search_width = window_width
+  END IF
 
   CALL process_view('n',scene_folder,output_folder,simple,stats,effective_k)
   CALL process_view('o',scene_folder,output_folder,simple,stats,effective_k)
