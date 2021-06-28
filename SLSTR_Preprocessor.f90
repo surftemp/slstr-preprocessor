@@ -145,7 +145,7 @@ MODULE SLSTR_Preprocessor
   INTEGER, PARAMETER :: FUNCTION_MIN_MAX_DIFF = 4
 
   !> Bucket capacity for new intermediate data bucket lookup structure
-  INTEGER, PARAMETER :: BUCKET_CAPACITY = 20
+  INTEGER, PARAMETER :: BUCKET_CAPACITY = 30
 
   ! -------------
   ! Derived Types
@@ -914,7 +914,7 @@ CONTAINS
 
     INTEGER :: elem, line, bucket_index
     INTEGER :: assigned
-    REAL :: v, scale_x, scale_y
+    REAL :: v, scale_x, scale_y, range_x, range_y
 
     IF (stripe == 'a') THEN
       main_source = MAIN_PIXEL_SOURCE_A
@@ -941,14 +941,16 @@ CONTAINS
 
     ! work out the region in the intermediate lookup grid where valid neighbours are stored
 
-    scale_x = lookup%width / (lookup%max_x-lookup%min_x)
-    scale_y = lookup%height / (lookup%max_y-lookup%min_y)
+    range_x = lookup%max_x-lookup%min_x
+    scale_x = lookup%width / range_x
+    range_y = lookup%max_y-lookup%min_y
+    scale_y = lookup%height / range_y
 
-    vis_x_min_index = FLOOR((ir_x-lookup%min_x)*scale_x)-CEILING(MAX_NEIGHBOUR_DISTANCE/(lookup%max_x-lookup%min_x))
-    vis_x_max_index = CEILING((ir_x-lookup%min_x)*scale_x)+CEILING(MAX_NEIGHBOUR_DISTANCE/(lookup%max_x-lookup%min_x))
+    vis_x_min_index = FLOOR(((ir_x-MAX_NEIGHBOUR_DISTANCE)-lookup%min_x) * scale_x)
+    vis_x_max_index = CEILING(((ir_x+MAX_NEIGHBOUR_DISTANCE)-lookup%min_x)*scale_x)
 
-    vis_y_min_index = FLOOR((ir_y-lookup%min_y)*scale_y)-CEILING(MAX_NEIGHBOUR_DISTANCE/(lookup%max_y-lookup%min_y))
-    vis_y_max_index = CEILING((ir_y-lookup%min_y)*scale_y)+CEILING(MAX_NEIGHBOUR_DISTANCE/(lookup%max_y-lookup%min_y))
+    vis_y_min_index = FLOOR(((ir_y-MAX_NEIGHBOUR_DISTANCE)-lookup%min_y)*scale_y)
+    vis_y_max_index = CEILING(((ir_y+MAX_NEIGHBOUR_DISTANCE)-lookup%min_y)*scale_y)
 
     ! clip to the dimensions of the lookup grid
     IF (vis_x_min_index < 1) THEN
@@ -966,6 +968,8 @@ CONTAINS
     END IF
 
     assigned = 0
+
+    ! PRINT *, vis_x_min_index,vis_x_max_index,vis_y_min_index,vis_y_max_index
 
     ! iterate over the area in the lookup grid where all neighbours will be found and build an ordered list of the closest K
     ! values in the neighborhood structure
@@ -1053,10 +1057,10 @@ CONTAINS
     ! ---------------
     ! Local Variables
     ! ---------------
-    INTEGER :: orphan_y, orphan_x
+    INTEGER :: orphan_y, orphan_x, index
     INTEGER :: ir_x, ir_y, vis_x, vis_y, b_x, b_y
     REAL :: v_x, v_y
-    REAL :: scale_x, scale_y
+    REAL :: scale_x, scale_y, range_x, range_y
     INTEGER :: visible_width, visible_height, ir_width, ir_height, orphan_width, orphan_height
     REAL x_max, x_min, y_max, y_min
     LOGICAL, ALLOCATABLE, DIMENSION(:,:) :: vis_mask
@@ -1070,20 +1074,22 @@ CONTAINS
     orphan_width = SIZE(orphan_cartesian%xcoords,1)
     orphan_height = visible_height
 
-    lookup%max_x = MAXVAL(main_cartesian%xcoords)
+    lookup%max_x = MAXVAL(main_cartesian%xcoords,mask=main_cartesian%xcoords /= MISSING_R)
     lookup%min_x = MINVAL(main_cartesian%xcoords,mask=main_cartesian%xcoords /= MISSING_R)
 
-    lookup%max_y = MAXVAL(main_cartesian%ycoords)
+    lookup%max_y = MAXVAL(main_cartesian%ycoords,mask=main_cartesian%xcoords /= MISSING_R)
     lookup%min_y = MINVAL(main_cartesian%ycoords,mask=main_cartesian%ycoords /= MISSING_R)
 
-    lookup%height = 2000
-    lookup%width = 2000
+    lookup%height = ir_height
+    lookup%width = ir_width
 
     ALLOCATE(lookup%buckets(lookup%height,lookup%width))
     lookup%buckets%allocated = 0
 
-    scale_x = lookup%width / (lookup%max_x-lookup%min_x)
-    scale_y = lookup%height / (lookup%max_y-lookup%min_y)
+    range_x = lookup%max_x-lookup%min_x
+    scale_x = lookup%width / range_x
+    range_y = lookup%max_y-lookup%min_y
+    scale_y = lookup%height / range_y
 
     DO vis_y = 1,visible_height
       DO vis_x = 1,visible_width
@@ -1096,7 +1102,6 @@ CONTAINS
           CYCLE
         END IF
         b_x = NINT((v_x - lookup%min_x) * scale_x)
-        b_y = NINT((v_y - lookup%min_y) * scale_y)
         IF (b_x < 1) THEN
           b_x = 1
         END IF
@@ -1111,19 +1116,21 @@ CONTAINS
         IF (b_y > lookup%height) THEN
           b_y = lookup%height
         END IF
+
         IF (lookup%buckets(b_y,b_x)%allocated == BUCKET_CAPACITY) THEN
           ! no space left in the lookup cell to store another visible pixel, increase BUCKET_CAPACITY should help
           PRINT *, 'ERROR overflow in build_neighbourhood_map'
           STOP
         END IF
-        lookup%buckets(b_y,b_x)%allocated = lookup%buckets(b_y,b_x)%allocated + 1
-        lookup%buckets(b_y,b_x)%xcoords(lookup%buckets(b_y,b_x)%allocated) = v_x
-        lookup%buckets(b_y,b_x)%ycoords(lookup%buckets(b_y,b_x)%allocated) = v_y
-        lookup%buckets(b_y,b_x)%xindices(lookup%buckets(b_y,b_x)%allocated) = vis_x
-        lookup%buckets(b_y,b_x)%yindices(lookup%buckets(b_y,b_x)%allocated) = vis_y
-        lookup%buckets(b_y,b_x)%is_orphan(lookup%buckets(b_y,b_x)%allocated) = .false.
-        lookup%buckets(b_y,b_x)%confidences(lookup%buckets(b_y,b_x)%allocated) = main_cartesian%confidence(vis_x,vis_y)
 
+        index = lookup%buckets(b_y,b_x)%allocated + 1
+        lookup%buckets(b_y,b_x)%allocated = index
+        lookup%buckets(b_y,b_x)%xcoords(index) = v_x
+        lookup%buckets(b_y,b_x)%ycoords(index) = v_y
+        lookup%buckets(b_y,b_x)%xindices(index) = vis_x
+        lookup%buckets(b_y,b_x)%yindices(index) = vis_y
+        lookup%buckets(b_y,b_x)%is_orphan(index) = .false.
+        lookup%buckets(b_y,b_x)%confidences(index) = main_cartesian%confidence(vis_x,vis_y)
       END DO
     END DO
 
@@ -1158,14 +1165,14 @@ CONTAINS
           PRINT *, 'ERROR overflow in build_neighbourhood_map'
           STOP
         END IF
-        lookup%buckets(b_y,b_x)%allocated = lookup%buckets(b_y,b_x)%allocated + 1
-        lookup%buckets(b_y,b_x)%xcoords(lookup%buckets(b_y,b_x)%allocated) = v_x
-        lookup%buckets(b_y,b_x)%ycoords(lookup%buckets(b_y,b_x)%allocated) = v_y
-        lookup%buckets(b_y,b_x)%xindices(lookup%buckets(b_y,b_x)%allocated) = orphan_x
-        lookup%buckets(b_y,b_x)%yindices(lookup%buckets(b_y,b_x)%allocated) = orphan_y
-        lookup%buckets(b_y,b_x)%is_orphan(lookup%buckets(b_y,b_x)%allocated) = .true.
-        lookup%buckets(b_y,b_x)%confidences(lookup%buckets(b_y,b_x)%allocated) = 0
-
+        index = lookup%buckets(b_y,b_x)%allocated + 1
+        lookup%buckets(b_y,b_x)%allocated = index
+        lookup%buckets(b_y,b_x)%xcoords(index) = v_x
+        lookup%buckets(b_y,b_x)%ycoords(index) = v_y
+        lookup%buckets(b_y,b_x)%xindices(index) = orphan_x
+        lookup%buckets(b_y,b_x)%yindices(index) = orphan_y
+        lookup%buckets(b_y,b_x)%is_orphan(index) = .true.
+        lookup%buckets(b_y,b_x)%confidences(index) = 0
       END DO
     END DO
 
