@@ -89,7 +89,7 @@ MODULE SLSTR_Preprocessor
   INTEGER :: MISSING_I = -32768
   
   !> Exclude neighbours further away than this (metres).
-  REAL :: MAX_NEIGHBOUR_DISTANCE = 10000
+  REAL :: MAX_NEIGHBOUR_DISTANCE = 4000
 
   !> Define a search window around the area (2*x,2*y) in which to look for closest visible pixels
   INTEGER :: search_width = 8, search_height = 6     ! Search window size, in pixels
@@ -145,7 +145,7 @@ MODULE SLSTR_Preprocessor
   INTEGER, PARAMETER :: FUNCTION_MIN_MAX_DIFF = 4
 
   !> Bucket capacity for new intermediate data bucket lookup structure
-  INTEGER, PARAMETER :: BUCKET_CAPACITY = 30
+  INTEGER, PARAMETER :: BUCKET_CAPACITY = 10
 
   ! -------------
   ! Derived Types
@@ -188,26 +188,33 @@ MODULE SLSTR_Preprocessor
     INTEGER :: valid_orphan_width
   END TYPE ORPHAN_LOCATIONS
 
-    !> Define a structure to hold a bucket of visible pixel locations
+    !> Store information on a visible pixel location
+  TYPE BUCKET_ITEM
+    REAL :: xcoord          ! the across-track distance of the visible pixel
+    REAL :: ycoord          ! the along-track distance of the visible pixel
+    INTEGER :: xindex       ! the x-index of the visible pixel location
+    INTEGER :: yindex       ! the y-index of the visible pixel location
+    INTEGER :: confidence   ! the confidence mask of the visible pixel (0 for orphan pixels)
+    LOGICAL :: is_orphan    ! .true. if the visible pixel is orphan
+  END TYPE BUCKET_ITEM
+
+    !> Define a structure to hold data on multiple of visible pixel locations that map to a bucket location
   TYPE BUCKET_ENTRY
-    REAL, DIMENSION(BUCKET_CAPACITY) :: xcoords
-    REAL, DIMENSION(BUCKET_CAPACITY) :: ycoords
-    INTEGER, DIMENSION(BUCKET_CAPACITY) :: xindices
-    INTEGER, DIMENSION(BUCKET_CAPACITY) :: yindices
-    INTEGER, DIMENSION(BUCKET_CAPACITY) :: confidences
-    LOGICAL, DIMENSION(BUCKET_CAPACITY) :: is_orphan
-    INTEGER :: allocated
+    TYPE(BUCKET_ITEM), ALLOCATABLE, DIMENSION(:) :: items
+    INTEGER :: allocated    ! the number allocated in the items array
   END TYPE BUCKET_ENTRY
 
-  TYPE BUCKET_LOOKUP
-    TYPE(BUCKET_ENTRY), ALLOCATABLE, DIMENSION(:,:) :: buckets
-    REAL :: min_x
-    REAL :: max_x
-    REAL :: min_y
-    REAL :: max_y
-    INTEGER :: height
-    INTEGER :: width
-  END TYPE BUCKET_LOOKUP
+    !> Define an intermediate data structure into which all visible (main and orphan) pixels will be placed
+    !> into a bucket at a location determined by their across and along track distances
+  TYPE SEARCHABLE_GRID
+    TYPE(BUCKET_ENTRY), ALLOCATABLE, DIMENSION(:,:) :: buckets    ! array of buckets organised by (x-index,y-index)
+    REAL :: min_x           ! min across-track distance, used to locate bucket x-index
+    REAL :: max_x           ! max across-track distance, used to locate bucket x-index
+    REAL :: min_y           ! min along-track distance, used to locate bucket y-index
+    REAL :: max_y           ! max along-track distance, used to locate bucket y-index
+    INTEGER :: height       ! conveniently provide the grid height
+    INTEGER :: width        ! conveniently provide the grid width
+  END TYPE SEARCHABLE_GRID
 
 CONTAINS
 !------------------------------------------------------------------------------
@@ -850,13 +857,64 @@ CONTAINS
     END DO
   END SUBROUTINE build_neighbourhood_map
 
+    !------------------------------------------------------------------------------
+!S+
+! NAME:
+!       resize_bucket_entry
+!
+! PURPOSE:
+!>      Double the capacity of a bucket entry, retaining the old items
+!
+! CATEGORY:
+!
+! LANGUAGE:
+!       Fortran-95
+!
+! CALLING SEQUENCE:
+!       CALL resize_bucket_entry(ir_cartesian, main_cartesian, orphan_cartesian, neighborhood)
+!
+! ARGUMENTS:
+!>@ARG{stripe, in, BUCKET_ENTRY} the bucket entry to be resized
+!
+! CALLS:
+!
+! SIDE EFFECTS:
+!       None
+!
+! RESTRICTIONS:
+!
+! PROCEDURE:
+!
+! CREATION HISTORY:
+!     29/06/21  NM  Creation
+!S-
+!------------------------------------------------------------------------------
+  PURE SUBROUTINE resize_bucket_entry(entry)
+    IMPLICIT NONE
+
+    ! ---------
+    ! Arguments
+    ! ---------
+    TYPE(BUCKET_ENTRY), INTENT(INOUT) :: entry
+
+    ! ---------------
+    ! Local Variables
+    ! ---------------
+    TYPE(BUCKET_ITEM), ALLOCATABLE, DIMENSION(:) :: resized_items
+
+    ALLOCATE(resized_items(2*SIZE(entry%items,1)))
+    resized_items(1:entry%allocated) = entry%items(1:entry%allocated)
+    CALL MOVE_ALLOC(resized_items, entry%items)
+
+  END SUBROUTINE resize_bucket_entry
+
   !------------------------------------------------------------------------------
 !S+
 ! NAME:
 !       find_neighbours_new
 !
 ! PURPOSE:
-!>      Find the closest radiance band pixels to a specific IR band pixel using faster bucket lookup
+!>      Find the closest radiance band pixels to a specific IR band pixel using search grid
 !
 ! CATEGORY:
 !
@@ -865,14 +923,14 @@ CONTAINS
 !
 ! CALLING SEQUENCE:
 !       CALL find_neighbours_new(ir_x_index, ir_y_index, ir_x, ir_y, &
-!                            lookup, neighborhood)
+!                            search_grid, neighborhood)
 !
 ! ARGUMENTS:
 !>@ARG{ir_x_index, in, INTEGER} the column of the IR pixel
 !>@ARG{ir_y_index, in, INTEGER} the row of the IR pixel
 !>@ARG{ir_x, in, REAL} across track distance of the IR pixel
 !>@ARG{ir_y, in, REAL} along track distance of the IR pixel
-!>@ARG{lookup, in, BUCKET_LOOKUP} intermediate data bucket lookup structure
+!>@ARG{search_grid, in, SEARCH_GRID} intermediate search grid structure
 !>@ARG{neighborhood, inout, NEIGHBOURHOOD_ENTRY} the neighbourhood map that is being constructed
 !>@ARG{stripe, in, CHARACTER(1)} the stripe which the cartesian data represents, 'a' or 'b'
 !
@@ -889,10 +947,10 @@ CONTAINS
 ! CREATION HISTORY:
 !     23/10/20  NM  Creation
 !     06/11/20  NM  Refactor after code review with CB,AW,OE
+  !   29/06/21  NM  Use search grid instead of search window
 !S-
 !------------------------------------------------------------------------------
-  PURE SUBROUTINE find_neighbours_new(ir_x_index, ir_y_index, ir_x, ir_y, &
-                                  lookup, neighbourhood, stripe)
+  PURE SUBROUTINE find_neighbours_new(ir_x_index, ir_y_index, ir_x, ir_y, search_grid, neighbourhood, stripe)
     IMPLICIT NONE
     ! ---------
     ! Arguments
@@ -901,20 +959,22 @@ CONTAINS
     INTEGER,                   INTENT(in)    :: ir_y_index
     REAL,                      INTENT(in)    :: ir_x
     REAL,                      INTENT(in)    :: ir_y
-    TYPE(BUCKET_LOOKUP),       INTENT(in)    :: lookup
+    TYPE(SEARCHABLE_GRID),     INTENT(in)    :: search_grid
     TYPE(NEIGHBOURHOOD_ENTRY), INTENT(inout) :: neighbourhood
     CHARACTER(1),              INTENT(in)    :: stripe
 
     ! ---------------
     ! Local Variables
     ! ---------------
-    INTEGER :: vis_x_min_index, vis_x_max_index, vis_y_min_index, vis_y_max_index
+    INTEGER :: b_x_min_index, b_x_max_index, b_y_min_index, b_y_max_index
     REAL :: max_dist_sq
     INTEGER :: main_source, orphan_source
 
-    INTEGER :: elem, line, bucket_index
+    INTEGER :: elem, line, index
     INTEGER :: assigned
     REAL :: v, scale_x, scale_y, range_x, range_y
+
+    TYPE(BUCKET_ITEM) :: item
 
     IF (stripe == 'a') THEN
       main_source = MAIN_PIXEL_SOURCE_A
@@ -939,61 +999,53 @@ CONTAINS
     ! Compute the threshold for squared distances - neighbours must be closer than this
     max_dist_sq = MAX_NEIGHBOUR_DISTANCE**2
 
-    ! work out the region in the intermediate lookup grid where valid neighbours are stored
+    ! work out the region in the intermediate search grid where valid neighbours are stored
 
-    range_x = lookup%max_x-lookup%min_x
-    scale_x = lookup%width / range_x
-    range_y = lookup%max_y-lookup%min_y
-    scale_y = lookup%height / range_y
+    range_x = search_grid%max_x-search_grid%min_x
+    scale_x = search_grid%width / range_x
+    range_y = search_grid%max_y-search_grid%min_y
+    scale_y = search_grid%height / range_y
 
-    vis_x_min_index = FLOOR(((ir_x-MAX_NEIGHBOUR_DISTANCE)-lookup%min_x) * scale_x)
-    vis_x_max_index = CEILING(((ir_x+MAX_NEIGHBOUR_DISTANCE)-lookup%min_x)*scale_x)
+    ! identify the min and max x-indices for buckets that may contain neighbours
+    b_x_min_index = FLOOR(((ir_x-MAX_NEIGHBOUR_DISTANCE)-search_grid%min_x) * scale_x)
+    b_x_max_index = CEILING(((ir_x+MAX_NEIGHBOUR_DISTANCE)-search_grid%min_x)*scale_x)
 
-    vis_y_min_index = FLOOR(((ir_y-MAX_NEIGHBOUR_DISTANCE)-lookup%min_y)*scale_y)
-    vis_y_max_index = CEILING(((ir_y+MAX_NEIGHBOUR_DISTANCE)-lookup%min_y)*scale_y)
+    ! identify the min and max y-indices for buckets that may contain neighbours
+    b_y_min_index = FLOOR(((ir_y-MAX_NEIGHBOUR_DISTANCE)-search_grid%min_y)*scale_y)
+    b_y_max_index = CEILING(((ir_y+MAX_NEIGHBOUR_DISTANCE)-search_grid%min_y)*scale_y)
 
-    ! clip to the dimensions of the lookup grid
-    IF (vis_x_min_index < 1) THEN
-      vis_x_min_index = 1
+    ! clip to the dimensions of the search grid
+    IF (b_x_min_index < 1) THEN
+      b_x_min_index = 1
     END IF
-    IF (vis_x_max_index > lookup%width) THEN
-      vis_x_max_index = lookup%width
+    IF (b_x_max_index > search_grid%width) THEN
+      b_x_max_index = search_grid%width
     END IF
 
-    IF (vis_y_min_index < 1) THEN
-      vis_y_min_index = 1
+    IF (b_y_min_index < 1) THEN
+      b_y_min_index = 1
     END IF
-    IF (vis_y_max_index > lookup%height) THEN
-      vis_y_max_index = lookup%height
+    IF (b_y_max_index > search_grid%height) THEN
+      b_y_max_index = search_grid%height
     END IF
 
     assigned = 0
 
-    ! PRINT *, vis_x_min_index,vis_x_max_index,vis_y_min_index,vis_y_max_index
-
-    ! iterate over the area in the lookup grid where all neighbours will be found and build an ordered list of the closest K
+    ! iterate over the area in the search grid where all neighbours will be found and build an ordered list of the closest K
     ! values in the neighborhood structure
-    DO line = vis_y_min_index, vis_y_max_index
-      ! main pixel array
-      DO elem = vis_x_min_index, vis_x_max_index
-
-        DO bucket_index = 1, BUCKET_CAPACITY
-          IF (bucket_index > lookup%buckets(line,elem)%allocated) THEN
-            EXIT
-          END IF
-
-          v = (lookup%buckets(line,elem)%xcoords(bucket_index) - ir_x) ** 2 + &
-                  (lookup%buckets(line,elem)%ycoords(bucket_index) - ir_y) ** 2
+    DO line = b_y_min_index, b_y_max_index
+      DO elem = b_x_min_index, b_x_max_index
+        DO index = 1, search_grid%buckets(elem,line)%allocated
+          item = search_grid%buckets(elem,line)%items(index)
+          v = (item%xcoord - ir_x) ** 2 + (item%ycoord - ir_y) ** 2
 
           IF (v >= max_dist_sq) CYCLE   ! ignore if the squared distance is too far away
-          IF (lookup%buckets(line,elem)%is_orphan(bucket_index)) THEN
-            CALL insert_neighbour(neighbourhood, assigned, v, orphan_source, &
-                lookup%buckets(line,elem)%xindices(bucket_index), lookup%buckets(line,elem)%yindices(bucket_index))
+          IF (item%is_orphan) THEN
+            CALL insert_neighbour(neighbourhood, assigned, v, orphan_source, item%xindex, item%yindex)
           ELSE
             ! ignore cosmetically filled pixels
-            IF (IAND(lookup%buckets(line,elem)%confidences(bucket_index), COSMETIC_PIXEL_MASK) /= 0) CYCLE
-            CALL insert_neighbour(neighbourhood, assigned, v, main_source, &
-                lookup%buckets(line,elem)%xindices(bucket_index), lookup%buckets(line,elem)%yindices(bucket_index))
+            IF (IAND(item%confidence, COSMETIC_PIXEL_MASK) /= 0) CYCLE
+            CALL insert_neighbour(neighbourhood, assigned, v, main_source, item%xindex, item%yindex)
           END IF
         END DO
       END DO
@@ -1009,7 +1061,7 @@ CONTAINS
 ! PURPOSE:
 !>      Find the K closest radiance band pixels to a every IR band pixel and store
 !>      the resulting mapping in a neighbourhood map.  Considers main and orphan
-!>      band pixels.  New version using faster bucket lookup instead of search window.
+!>      band pixels.  New version using search grid instead of search window.
 !
 ! CATEGORY:
 !
@@ -1042,7 +1094,7 @@ CONTAINS
   !     06/11/20  NM  Refactor after code review with CB,AW,OE
 !S-
 !------------------------------------------------------------------------------
-  SUBROUTINE build_neighbourhood_map_new(ir_cartesian, main_cartesian, orphan_cartesian, &
+  PURE SUBROUTINE build_neighbourhood_map_new(ir_cartesian, main_cartesian, orphan_cartesian, &
                                           neighbourhood, stripe)
     IMPLICIT NONE
     ! ---------
@@ -1065,7 +1117,8 @@ CONTAINS
     REAL x_max, x_min, y_max, y_min
     LOGICAL, ALLOCATABLE, DIMENSION(:,:) :: vis_mask
     TYPE(BUCKET_ENTRY) :: bucket
-    TYPE(BUCKET_LOOKUP) :: lookup
+    TYPE(SEARCHABLE_GRID) :: search_grid
+    TYPE(BUCKET_ITEM) :: new_bucket
 
     visible_width = SIZE(main_cartesian%xcoords,1)
     visible_height = SIZE(main_cartesian%xcoords,2)
@@ -1074,22 +1127,27 @@ CONTAINS
     orphan_width = SIZE(orphan_cartesian%xcoords,1)
     orphan_height = visible_height
 
-    lookup%max_x = MAXVAL(main_cartesian%xcoords,mask=main_cartesian%xcoords /= MISSING_R)
-    lookup%min_x = MINVAL(main_cartesian%xcoords,mask=main_cartesian%xcoords /= MISSING_R)
+    search_grid%max_x = MAXVAL(main_cartesian%xcoords,mask=main_cartesian%xcoords /= MISSING_R)
+    search_grid%min_x = MINVAL(main_cartesian%xcoords,mask=main_cartesian%xcoords /= MISSING_R)
 
-    lookup%max_y = MAXVAL(main_cartesian%ycoords,mask=main_cartesian%xcoords /= MISSING_R)
-    lookup%min_y = MINVAL(main_cartesian%ycoords,mask=main_cartesian%ycoords /= MISSING_R)
+    search_grid%max_y = MAXVAL(main_cartesian%ycoords,mask=main_cartesian%xcoords /= MISSING_R)
+    search_grid%min_y = MINVAL(main_cartesian%ycoords,mask=main_cartesian%ycoords /= MISSING_R)
 
-    lookup%height = ir_height
-    lookup%width = ir_width
+    search_grid%height = ir_height
+    search_grid%width = ir_width
 
-    ALLOCATE(lookup%buckets(lookup%height,lookup%width))
-    lookup%buckets%allocated = 0
+    ALLOCATE(search_grid%buckets(search_grid%width,search_grid%height))
+    DO b_y = 1,search_grid%height
+      DO b_x = 1,search_grid%width
+        ALLOCATE(search_grid%buckets(b_x,b_y)%items(BUCKET_CAPACITY))
+      END DO
+    END DO
+    search_grid%buckets%allocated = 0
 
-    range_x = lookup%max_x-lookup%min_x
-    scale_x = lookup%width / range_x
-    range_y = lookup%max_y-lookup%min_y
-    scale_y = lookup%height / range_y
+    range_x = search_grid%max_x-search_grid%min_x
+    scale_x = search_grid%width / range_x
+    range_y = search_grid%max_y-search_grid%min_y
+    scale_y = search_grid%height / range_y
 
     DO vis_y = 1,visible_height
       DO vis_x = 1,visible_width
@@ -1101,36 +1159,35 @@ CONTAINS
         IF (v_y == MISSING_R) THEN
           CYCLE
         END IF
-        b_x = NINT((v_x - lookup%min_x) * scale_x)
+        b_x = NINT((v_x - search_grid%min_x) * scale_x)
         IF (b_x < 1) THEN
           b_x = 1
         END IF
-        IF (b_x > lookup%width) THEN
-          b_x = lookup%width
+        IF (b_x > search_grid%width) THEN
+          b_x = search_grid%width
         END IF
 
-        b_y = NINT((v_y - lookup%min_y) * scale_y)
+        b_y = NINT((v_y - search_grid%min_y) * scale_y)
         IF (b_y < 1) THEN
           b_y = 1
         END IF
-        IF (b_y > lookup%height) THEN
-          b_y = lookup%height
+        IF (b_y > search_grid%height) THEN
+          b_y = search_grid%height
         END IF
 
-        IF (lookup%buckets(b_y,b_x)%allocated == BUCKET_CAPACITY) THEN
-          ! no space left in the lookup cell to store another visible pixel, increase BUCKET_CAPACITY should help
-          PRINT *, 'ERROR overflow in build_neighbourhood_map'
-          STOP
+        IF (search_grid%buckets(b_x,b_y)%allocated >= SIZE(search_grid%buckets(b_x,b_y)%items,1)) THEN
+          CALL resize_bucket_entry(search_grid%buckets(b_x,b_y))
         END IF
 
-        index = lookup%buckets(b_y,b_x)%allocated + 1
-        lookup%buckets(b_y,b_x)%allocated = index
-        lookup%buckets(b_y,b_x)%xcoords(index) = v_x
-        lookup%buckets(b_y,b_x)%ycoords(index) = v_y
-        lookup%buckets(b_y,b_x)%xindices(index) = vis_x
-        lookup%buckets(b_y,b_x)%yindices(index) = vis_y
-        lookup%buckets(b_y,b_x)%is_orphan(index) = .false.
-        lookup%buckets(b_y,b_x)%confidences(index) = main_cartesian%confidence(vis_x,vis_y)
+        index = search_grid%buckets(b_x,b_y)%allocated + 1
+        search_grid%buckets(b_x,b_y)%allocated = index
+        new_bucket%xcoord = v_x
+        new_bucket%ycoord = v_y
+        new_bucket%xindex = vis_x
+        new_bucket%yindex = vis_y
+        new_bucket%is_orphan = .false.
+        new_bucket%confidence = main_cartesian%confidence(vis_x,vis_y)
+        search_grid%buckets(b_x,b_y)%items(index) = new_bucket
       END DO
     END DO
 
@@ -1144,35 +1201,36 @@ CONTAINS
         IF (v_y == MISSING_R) THEN
           CYCLE
         END IF
-        b_x = NINT((v_x - lookup%min_x) * scale_x)
+        b_x = NINT((v_x - search_grid%min_x) * scale_x)
         IF (b_x < 1) THEN
           b_x = 1
         END IF
-        IF (b_x > lookup%width) THEN
-          b_x = lookup%width
+        IF (b_x > search_grid%width) THEN
+          b_x = search_grid%width
         END IF
 
-        b_y = NINT((v_y - lookup%min_y) * scale_y)
+        b_y = NINT((v_y - search_grid%min_y) * scale_y)
         IF (b_y < 1) THEN
           b_y = 1
         END IF
-        IF (b_y > lookup%height) THEN
-          b_y = lookup%height
+        IF (b_y > search_grid%height) THEN
+          b_y = search_grid%height
         END IF
 
-        IF (lookup%buckets(b_y,b_x)%allocated == BUCKET_CAPACITY) THEN
-          ! no space left in the lookup cell to store another visible pixel, increase BUCKET_CAPACITY should help
-          PRINT *, 'ERROR overflow in build_neighbourhood_map'
-          STOP
+        IF (search_grid%buckets(b_x,b_y)%allocated >= SIZE(search_grid%buckets(b_x,b_y)%items,1)) THEN
+          CALL resize_bucket_entry(search_grid%buckets(b_x,b_y))
         END IF
-        index = lookup%buckets(b_y,b_x)%allocated + 1
-        lookup%buckets(b_y,b_x)%allocated = index
-        lookup%buckets(b_y,b_x)%xcoords(index) = v_x
-        lookup%buckets(b_y,b_x)%ycoords(index) = v_y
-        lookup%buckets(b_y,b_x)%xindices(index) = orphan_x
-        lookup%buckets(b_y,b_x)%yindices(index) = orphan_y
-        lookup%buckets(b_y,b_x)%is_orphan(index) = .true.
-        lookup%buckets(b_y,b_x)%confidences(index) = 0
+
+        index = search_grid%buckets(b_x,b_y)%allocated + 1
+        search_grid%buckets(b_x,b_y)%allocated = index
+
+        new_bucket%xcoord = v_x
+        new_bucket%ycoord = v_y
+        new_bucket%xindex = orphan_x
+        new_bucket%yindex = orphan_y
+        new_bucket%is_orphan = .true.
+        new_bucket%confidence = 0
+        search_grid%buckets(b_x,b_y)%items(index) = new_bucket
       END DO
     END DO
 
@@ -1181,7 +1239,7 @@ CONTAINS
       DO ir_x = 1,ir_width
         v_x = ir_cartesian%xcoords(ir_x,ir_y)
         v_y = ir_cartesian%ycoords(ir_x,ir_y)
-        CALL find_neighbours_new(ir_x,ir_y,v_x,v_y,lookup,neighbourhood%entries(ir_x,ir_y),stripe)
+        CALL find_neighbours_new(ir_x,ir_y,v_x,v_y,search_grid,neighbourhood%entries(ir_x,ir_y),stripe)
       END DO
     END DO
   END SUBROUTINE build_neighbourhood_map_new

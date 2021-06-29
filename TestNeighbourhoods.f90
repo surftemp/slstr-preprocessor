@@ -103,7 +103,7 @@ END SUBROUTINE dump_entry
 !
 !S-
 !------------------------------------------------------------------------------
-SUBROUTINE compare_neighbourhood_entries(old_neighbourhood, new_neighbourhood)
+SUBROUTINE compare_neighbourhood_entries(old_neighbourhood, new_neighbourhood, detailed)
   USE SLSTR_Preprocessor
   IMPLICIT NONE
 
@@ -112,6 +112,7 @@ SUBROUTINE compare_neighbourhood_entries(old_neighbourhood, new_neighbourhood)
   ! -----------
   TYPE(NEIGHBOURHOOD_MAP), INTENT(IN) :: old_neighbourhood
   TYPE(NEIGHBOURHOOD_MAP), INTENT(IN) :: new_neighbourhood
+  LOGICAL, INTENT(IN) :: detailed
 
   ! ---------------
   ! Local Variables
@@ -121,6 +122,7 @@ SUBROUTINE compare_neighbourhood_entries(old_neighbourhood, new_neighbourhood)
   INTEGER :: old_main_count, old_orphan_count, new_main_count, new_orphan_count
   INTEGER :: old_source, new_source
   INTEGER :: old_entries_count, new_entries_count
+
 
   old_main_count = 0
   old_orphan_count = 0
@@ -159,22 +161,26 @@ SUBROUTINE compare_neighbourhood_entries(old_neighbourhood, new_neighbourhood)
             new_orphan_count = new_orphan_count + 1
             new_entries_count = new_entries_count + 1
         end if
-        if (old_sqdist /= new_sqdist) THEN
-          PRINT *, 'Sq dists differ at', row, col
+        IF (detailed) THEN
+          IF (old_sqdist /= new_sqdist) THEN
+            PRINT *, 'Sq dists differ at', row, col
+            PRINT *, 'OLD'
+            CALL dump_entry(old_neighbourhood%entries(col,row))
+            PRINT *, 'NEW'
+            CALL dump_entry(new_neighbourhood%entries(col,row))
+            STOP
+          END IF
+        END IF
+      END DO
+      IF (detailed) THEN
+        IF (old_entries_count /= new_entries_count) THEN
+          PRINT *, 'Entries differ at', row, col
           PRINT *, 'OLD'
           CALL dump_entry(old_neighbourhood%entries(col,row))
           PRINT *, 'NEW'
           CALL dump_entry(new_neighbourhood%entries(col,row))
           STOP
-        end if
-      END DO
-      IF (old_entries_count /= new_entries_count) THEN
-        PRINT *, 'Entries differ at', row, col
-        PRINT *, 'OLD'
-        CALL dump_entry(old_neighbourhood%entries(col,row))
-        PRINT *, 'NEW'
-        CALL dump_entry(new_neighbourhood%entries(col,row))
-        STOP
+        END IF
       END IF
     END DO
   END DO
@@ -223,7 +229,7 @@ END SUBROUTINE compare_neighbourhood_entries
 !
 !S-
 !------------------------------------------------------------------------------
-SUBROUTINE compare_neighbourhoods(view_type, scene_folder, effective_k)
+SUBROUTINE compare_neighbourhoods(view_type, scene_folder, effective_k, detail)
   USE SLSTR_Preprocessor
   USE GbcsPath
   USE netcdf
@@ -235,6 +241,7 @@ SUBROUTINE compare_neighbourhoods(view_type, scene_folder, effective_k)
   CHARACTER(1), INTENT(IN) :: view_type
   CHARACTER(LEN=*), INTENT(IN) :: scene_folder
   INTEGER, INTENT(IN) :: effective_k
+  LOGICAL, INTENT(IN) :: detail
 
   ! ---------------
   ! Local Variables
@@ -245,13 +252,6 @@ SUBROUTINE compare_neighbourhoods(view_type, scene_folder, effective_k)
   REAL :: old_start_time, old_end_time, old_elapsed_time
   REAL :: new_start_time, new_end_time, new_elapsed_time
 
-  use_new_neighbourhood_algorithm = .false.
-  CALL cpu_time(old_start_time)
-  CALL compute_scene_neighbourhood(view_type,scene_folder,old_neighbourhood_a,'a')
-  CALL cpu_time(old_end_time)
-
-  old_elapsed_time = old_end_time - old_start_time
-
   use_new_neighbourhood_algorithm = .true.
   CALL cpu_time(new_start_time)
   CALL compute_scene_neighbourhood(view_type,scene_folder,new_neighbourhood_a,'a')
@@ -259,10 +259,17 @@ SUBROUTINE compare_neighbourhoods(view_type, scene_folder, effective_k)
 
   new_elapsed_time = new_end_time - new_start_time
 
+  use_new_neighbourhood_algorithm = .false.
+  CALL cpu_time(old_start_time)
+  CALL compute_scene_neighbourhood(view_type,scene_folder,old_neighbourhood_a,'a')
+  CALL cpu_time(old_end_time)
+
+  old_elapsed_time = old_end_time - old_start_time
+
   PRINT *, 'old neighbourhood build time: ', old_elapsed_time
   PRINT *, 'new neighbourhood build time', new_elapsed_time
 
-  CALL compare_neighbourhood_entries(old_neighbourhood_a,new_neighbourhood_a)
+  CALL compare_neighbourhood_entries(old_neighbourhood_a,new_neighbourhood_a, detail)
 END SUBROUTINE compare_neighbourhoods
 
 PROGRAM TestNeighbourhoods
@@ -278,15 +285,13 @@ PROGRAM TestNeighbourhoods
   CHARACTER(256) :: option_value
 
   INTEGER :: effective_k, i, max_distance, window_height, window_width
-  LOGICAL :: simple, stats, compare
+  LOGICAL :: detail
 
-  simple = .false.
-  stats = .false.
-  compare = .false.
   effective_k = MAX_K_NEAREST_NEIGHBOURS
-  max_distance = 4000
+  max_distance = 0
   window_height = 0
   window_width = 0
+  detail = .false.
 
   CALL GET_COMMAND_ARGUMENT(1,scene_folder)
 
@@ -301,6 +306,8 @@ PROGRAM TestNeighbourhoods
       END IF
       i = i + 1
       READ(option_value,'(I3.1)') effective_k
+    ELSE IF (option == '--detail') THEN
+      detail = .true.
     ELSE IF (option == '--window_height') THEN
       CALL GET_COMMAND_ARGUMENT(i,option_value)
       IF (option_Value == '') THEN
@@ -329,7 +336,9 @@ PROGRAM TestNeighbourhoods
   END DO
 
   MISSING_R = -1.0e+30
-  MAX_NEIGHBOUR_DISTANCE = max_distance
+  IF (max_distance > 0) THEN
+    MAX_NEIGHBOUR_DISTANCE = max_distance
+  END IF
   IF (window_height > 0) THEN
     search_height = window_height
   END IF
@@ -337,6 +346,7 @@ PROGRAM TestNeighbourhoods
     search_width = window_width
   END IF
 
-  CALL compare_neighbourhoods('n',scene_folder,effective_k)
+  CALL compare_neighbourhoods('n',scene_folder,effective_k,detail)
+  CALL compare_neighbourhoods('o',scene_folder,effective_k,detail)
 
 END PROGRAM TestNeighbourhoods

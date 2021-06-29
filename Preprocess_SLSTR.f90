@@ -393,7 +393,7 @@ END SUBROUTINE show_neighbourhood_stats
 !
 !S-
 !------------------------------------------------------------------------------
-SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, compare, effective_k)
+SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, effective_k)
   USE SLSTR_Preprocessor
   USE GbcsPath
   USE netcdf
@@ -405,7 +405,7 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, c
   CHARACTER(1), INTENT(IN) :: view_type
   CHARACTER(LEN=*), INTENT(IN) :: scene_folder
   CHARACTER(LEN=*), INTENT(IN) :: output_folder
-  LOGICAL, INTENT(IN) :: simple, stats, compare
+  LOGICAL, INTENT(IN) :: simple, stats
   INTEGER, INTENT(IN) :: effective_k
 
   ! ---------------
@@ -532,13 +532,13 @@ PROGRAM Preprocess_SLSTR
   CHARACTER(256) :: option_value
 
   INTEGER :: effective_k, i, max_distance, window_height, window_width
-  LOGICAL :: simple, stats, compare
+  LOGICAL :: simple, stats, use_new
 
   simple = .false.
   stats = .false.
-  compare = .false.
+  use_new = .false.
   effective_k = MAX_K_NEAREST_NEIGHBOURS
-  max_distance = 10000
+  max_distance = 4000
   window_height = 0
   window_width = 0
 
@@ -553,8 +553,8 @@ PROGRAM Preprocess_SLSTR
       simple = .true.
     ELSE IF (option == '--stats') THEN
       stats = .true.
-    ELSE IF (option == '--compare') THEN
-      compare = .true.
+    ELSE IF (option == '--new') THEN
+      use_new = .true.
     ELSE IF (option == '--effective_k') THEN
       CALL GET_COMMAND_ARGUMENT(i,option_value)
       IF (option_Value == '') THEN
@@ -598,6 +598,8 @@ PROGRAM Preprocess_SLSTR
     search_width = window_width
   END IF
 
-  CALL process_view('n',scene_folder,output_folder,simple,stats,compare,effective_k)
-  CALL process_view('o',scene_folder,output_folder,simple,stats,compare,effective_k)
+  use_new_neighbourhood_algorithm = use_new
+
+  CALL process_view('n',scene_folder,output_folder,simple,stats,effective_k)
+  CALL process_view('o',scene_folder,output_folder,simple,stats,effective_k)
 END PROGRAM Preprocess_SLSTR
