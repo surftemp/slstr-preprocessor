@@ -642,6 +642,7 @@ CONTAINS
 ! CREATION HISTORY:
 !     23/10/20  NM  Creation
 !     06/11/20  NM  Refactor after code review with CB,AW,OE
+!     13/05/21  OE  Rewrite to avoid array temporaries, improve performace
 !S-
 !------------------------------------------------------------------------------
   PURE SUBROUTINE find_neighbours(ir_x_index, ir_y_index, ir_x, ir_y, &
@@ -1064,6 +1065,7 @@ CONTAINS
 ! CREATION HISTORY:
 !     11/01/21  NM  Creation
 !     17/02/21  NM  Refactor out apply_function
+!     28/06/21  OE  Fix for granules with odd number of scanlines
 !S-
 !------------------------------------------------------------------------------
   PURE SUBROUTINE apply_simple_aggregation(vis_radiance, vis_output_radiance, function_code)
@@ -1078,20 +1080,23 @@ CONTAINS
     ! ---------------
     ! Local Variables
     ! ---------------
-    INTEGER :: ir_height, ir_width
+    INTEGER :: ir_height, ir_width, vis_height
     INTEGER :: ir_x, ir_y, x_off, y_off, vcount
     REAL :: vis_value
     REAL, DIMENSION(4) :: values
 
     ir_width = SIZE(vis_output_radiance,1)
     ir_height = SIZE(vis_output_radiance,2)
+    vis_height = SIZE(vis_radiance, 2)
 
-    DO ir_y=1,ir_height
-      DO ir_x=1,ir_width
+    ! -- Some granules do not have exactly 2x as many visible scanlines as IR
+    !    so check heights of both bands
+    DO ir_y=1, MIN(ir_height, vis_height/2)
+      DO ir_x=1, ir_width
         vcount = 0
-        DO x_off = 0,1
-          DO y_off = 0,1
-            vis_value = vis_radiance(2*ir_x-x_off,2*ir_y-y_off)
+        DO y_off = -1, 0
+          DO x_off = -1, 0
+            vis_value = vis_radiance(2*ir_x+x_off, 2*ir_y+y_off)
             IF (vis_value /= MISSING_R) THEN
               vcount = vcount + 1
               values(vcount) = vis_value
@@ -1101,6 +1106,22 @@ CONTAINS
         vis_output_radiance(ir_x,ir_y) = apply_function(function_code,values,vcount)
       END DO
     END DO
+
+    ! -- Process the final row if we have an odd number of visible scanlines
+    IF (ir_y <= ir_height .AND. MODULO(vis_height, 2) == 1) THEN
+      DO ir_x=1, ir_width
+        vcount = 0
+        DO x_off = -1, 0
+          vis_value = vis_radiance(2*ir_x+x_off, 2*ir_y-1)
+          IF (vis_value /= MISSING_R) THEN
+            vcount = vcount + 1
+            values(vcount) = vis_value
+          END IF
+        END DO
+        vis_output_radiance(ir_x,ir_y) = apply_function(function_code,values,vcount)
+      END DO
+    END IF
+
   END SUBROUTINE
 
 
@@ -1167,39 +1188,34 @@ CONTAINS
     ! ---------------
     ! Local Variables
     ! ---------------
-    INTEGER rad_ncid, visible_width, visible_height, orphan_width, status
-    CHARACTER(256) :: orphan_radiance_field_name, radiance_field_name, exception_field_name
-    CHARACTER(1) :: band_str
+    INTEGER :: ncid, dimid, status
+    INTEGER :: width, height, orphans
+    CHARACTER(40) :: orphan_name, radiance_name, exception_name
 
-    WRITE(band_str,'(I1)') band
+
+    WRITE(radiance_name, '("S",I1,"_radiance_",A1,A1)') band, stripe, view_type
+    WRITE(orphan_name, '("S",I1,"_radiance_orphan_",A1,A1)') band, stripe, view_type
+    WRITE(exception_name, '("S",I1,"_exception_",A1,A1)') band, stripe, view_type
+
+    ncid = safe_open(Path_Join(scene_folder, TRIM(radiance_name)//'.nc'))
 
     ! Work out the sizes of the arrays
-    visible_height = 2400
-    IF (view_type == 'n') THEN
-      ! nadir view
-      visible_width = 3000
-      orphan_width = 374
-    ELSE
-      ! oblique view
-      visible_width = 1800
-      orphan_width = 224
-    END IF
+    status = nf90_inq_dimid(ncid, 'columns', dimid)
+    status = nf90_inquire_dimension(ncid, dimid, LEN=width)
+    status = nf90_inq_dimid(ncid, 'rows', dimid)
+    status = nf90_inquire_dimension(ncid, dimid, LEN=height)
+    status = nf90_inq_dimid(ncid, 'orphan_pixels', dimid)
+    status = nf90_inquire_dimension(ncid, dimid, LEN=orphans)
 
-    ALLOCATE(vis_radiance(1:visible_width,1:visible_height))
-    ALLOCATE(vis_orphans(1:orphan_width,1:visible_height))
-    ALLOCATE(vis_exception(1:visible_width,1:visible_height))
+    ALLOCATE(vis_radiance(width, height), &
+             vis_orphans(orphans, height), &
+             vis_exception(width, height))
 
-    WRITE(radiance_field_name, '("S",I1,"_radiance_",A1,A1)') band, stripe,view_type
-    rad_ncid = safe_open(Path_Join(scene_folder,'S'//band_str//'_radiance_'//stripe//view_type//'.nc'))
-    CALL safe_get_real_data(rad_ncid,TRIM(radiance_field_name),vis_radiance,MISSING_R)
+    CALL safe_get_real_data(ncid, TRIM(radiance_name), vis_radiance, MISSING_R)
+    CALL safe_get_real_data(ncid, TRIM(orphan_name), vis_orphans, MISSING_R)
+    CALL safe_get_int_data(ncid, TRIM(exception_name), vis_exception, MISSING_I)
+    status = nf90_close(ncid)
 
-    WRITE(orphan_radiance_field_name, '("S",I1,"_radiance_orphan_",A1,A1)') band, stripe, view_type
-    CALL safe_get_real_data(rad_ncid,TRIM(orphan_radiance_field_name),vis_orphans,MISSING_R)
-
-    WRITE(exception_field_name, '("S",I1,"_exception_",A1,A1)') band, stripe, view_type
-    CALL safe_get_int_data(rad_ncid,TRIM(exception_field_name),vis_exception,MISSING_I)
-
-    status = nf90_close(rad_ncid)
   END SUBROUTINE load_radiance_data
 
 
@@ -1292,7 +1308,7 @@ CONTAINS
     END IF
 
     IF (effective_k <= 0 .or. effective_k > MAX_K_NEAREST_NEIGHBOURS) THEN
-        PRINT *, 'effective_k must be greater than 0 and less than or equal to MAX_K_NEAREST_NEIGHBOURS', function_code
+        PRINT *, 'effective_k must be greater than 0 and less than or equal to MAX_K_NEAREST_NEIGHBOURS', effective_k
         RETURN
     END IF
 
@@ -1587,7 +1603,7 @@ CONTAINS
     ! Local Variables
     ! ---------------
     INTEGER :: status
-    INTEGER :: vis_ncid, flags_ncid, ir_ncid, iflags_ncid, s8_bt_ncid
+    INTEGER :: vis_ncid, flags_ncid, ir_ncid, iflags_ncid, s8_bt_ncid, dimid
     INTEGER :: visible_width, visible_height, ir_width, ir_height, orphan_width
 
     ! Create data structures to hold the x- and y- 2D arrays for the IR and main / orphan pixels
@@ -1598,23 +1614,7 @@ CONTAINS
     REAL, ALLOCATABLE, DIMENSION(:,:) :: s8_bt
     INTEGER :: ix, iy
 
-    ! Work out the sizes of the arrays
-    visible_height = 2400
-    ir_height = 1200
-    IF (view_type == 'n') THEN
-      ! nadir view
-      visible_width = 3000
-      ir_width = 1500
-      orphan_width = 374
-    ELSE
-      ! oblique view
-      visible_width = 1800
-      ir_width = 900
-      orphan_width = 224
-    END IF
 
-    ! Allocate the arrays for each data structure
-    ALLOCATE(neighbourhood%entries(ir_width,ir_height))
     IF (stripe == 'a') THEN
       neighbourhood%include_a_stripe = .true.
       neighbourhood%include_b_stripe = .false.
@@ -1623,21 +1623,34 @@ CONTAINS
       neighbourhood%include_b_stripe = .true.
     END IF
 
-    ALLOCATE(ir_cartesian%xcoords(ir_width,ir_height))
-    ALLOCATE(ir_cartesian%ycoords(ir_width,ir_height))
+    vis_ncid = safe_open(Path_Join(scene_folder, 'cartesian_'//stripe//view_type//'.nc'))
+    ir_ncid = safe_open(Path_Join(scene_folder, 'cartesian_i'//view_type//'.nc'))
+    flags_ncid = safe_open(Path_Join(scene_folder, 'flags_'//stripe//view_type//'.nc'))
 
-    ALLOCATE(main_cartesian%xcoords(visible_width,visible_height))
-    ALLOCATE(main_cartesian%ycoords(visible_width,visible_height))
-    ALLOCATE(main_cartesian%confidence(visible_width,visible_height))
+    ! Work out the sizes of the arrays
+    status = nf90_inq_dimid(vis_ncid, 'columns', dimid)
+    status = nf90_inquire_dimension(vis_ncid, dimid, LEN=visible_width)
+    status = nf90_inq_dimid(vis_ncid, 'rows', dimid)
+    status = nf90_inquire_dimension(vis_ncid, dimid, LEN=visible_height)
+    status = nf90_inq_dimid(vis_ncid, 'orphan_pixels', dimid)
+    status = nf90_inquire_dimension(vis_ncid, dimid, LEN=orphan_width)
 
-    ALLOCATE(orphan_cartesian%xcoords(orphan_width,visible_height))
-    ALLOCATE(orphan_cartesian%ycoords(orphan_width,visible_height))
+    status = nf90_inq_dimid(ir_ncid, 'columns', dimid)
+    status = nf90_inquire_dimension(ir_ncid, dimid, LEN=ir_width)
+    status = nf90_inq_dimid(ir_ncid, 'rows', dimid)
+    status = nf90_inquire_dimension(ir_ncid, dimid, LEN=ir_height)
 
-    ! Load the cartesian coordinates arrays and flags from the scene
-    vis_ncid = safe_open(Path_Join(scene_folder,'cartesian_'//stripe//view_type//'.nc'))
-    ir_ncid = safe_open(Path_Join(scene_folder,'cartesian_i'//view_type//'.nc'))
-    flags_ncid = safe_open(Path_Join(scene_folder,'flags_'//stripe//view_type//'.nc'))
+    ! Allocate the arrays for each data structure
+    ALLOCATE(neighbourhood%entries(ir_width,ir_height), &
+             ir_cartesian%xcoords(ir_width,ir_height), &
+             ir_cartesian%ycoords(ir_width,ir_height), &
+             main_cartesian%xcoords(visible_width,visible_height), &
+             main_cartesian%ycoords(visible_width,visible_height), &
+             main_cartesian%confidence(visible_width,visible_height), &
+             orphan_cartesian%xcoords(orphan_width,visible_height), &
+             orphan_cartesian%ycoords(orphan_width,visible_height))
 
+   ! Load the cartesian coordinates arrays and flags from the scene
     CALL safe_get_real_data(vis_ncid,'x_'//stripe//view_type,main_cartesian%xcoords, MISSING_R)
     CALL safe_get_real_data(vis_ncid,'y_'//stripe//view_type,main_cartesian%ycoords, MISSING_R)
     CALL safe_get_int_data(flags_ncid,'confidence_'//stripe//view_type,main_cartesian%confidence, MISSING_I)
