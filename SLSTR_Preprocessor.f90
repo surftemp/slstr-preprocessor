@@ -1612,7 +1612,6 @@ CONTAINS
     TYPE(ORPHAN_LOCATIONS) :: orphan_cartesian
     INTEGER, ALLOCATABLE, DIMENSION(:,:) :: iflags
     REAL, ALLOCATABLE, DIMENSION(:,:) :: s8_bt
-    INTEGER :: ix, iy
 
 
     IF (stripe == 'a') THEN
