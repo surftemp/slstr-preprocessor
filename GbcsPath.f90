@@ -33,10 +33,8 @@
 !       Written by:   Owen Embury 11/10/2011
 !                     IAES, University of Edinburgh
 !
-!
-!    Copyright 2008 Chris Merchant, Chris Old, and Owen Embury
-!    The Institute of Atmospheric and Environmental Science
-!    The University of Edinburgh, UK
+!    Copyright 2021 Owen Embury, and Claire Bulgin
+!    Department of Meteorology, University of Reading, UK
 !
 !    This file is part of the GBCS software package.
 !
@@ -53,7 +51,6 @@
 !    You should have received a copy of the GNU General Public License
 !    along with the GBCS software package.
 !    If not, see <http://www.gnu.org/licenses/>.
-!
 !M-
 !------------------------------------------------------------------------------
 MODULE GbcsPath

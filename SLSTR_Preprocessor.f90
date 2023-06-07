@@ -53,9 +53,8 @@
 !     Written by:  Niall McCarroll 12/01/21
 !                University of Reading
 !
-!  Copyright 2020 Chris Merchant, Owen Embury, and Claire Bulgin
-!  The Institute of Atmospheric and Environmental Science
-!  The University of Edinburgh, UK
+!  Copyright 2021 Owen Embury, and Claire Bulgin
+!  Department of Meteorology, University of Reading, UK
 !
 !  This file is part of the GBCS software package.
 !

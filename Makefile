@@ -11,19 +11,22 @@ else
 endif
 
 
-all: Preprocess_SLSTR
+all: Preprocess_SLSTR s3regrid
 
 clean:
-	$(RM) Preprocess_SLSTR
+	$(RM) Preprocess_SLSTR s3regrid
 	$(RM) *.o *.mod
 
 Preprocess_SLSTR: Preprocess_SLSTR.o SLSTR_Preprocessor.o GbcsPath.o
-
+s3regrid: s3regrid.o GbcsKinds.o GbcsNetCDF.o GbcsPath.o SLSTR_Preprocessor.o
 
 # Dependencies
 SLSTR_Preprocessor.o: SLSTR_Preprocessor.f90 GbcsPath.o
 Preprocess_SLSTR.o: Preprocess_SLSTR.f90 SLSTR_Preprocessor.o GbcsPath.o
 GbcsPath.o: GbcsPath.f90
+GbcsKinds.o: GbcsKinds.f90
+GbcsNetCDF.o: GbcsNetCDF.f90
+s3regrid.o: s3regrid.f90 GbcsKinds.o GbcsNetCDF.o GbcsPath.o SLSTR_Preprocessor.o
 
 
 # Default rules
