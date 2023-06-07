@@ -100,6 +100,14 @@ def replacenc(filename, vars=None):
     for v in vars:
         var = src.variables[v]
         opts = var.filters() or {}
+        # netCDF4-python API has changed, so need to remove
+        # compression filters from dict.
+        comp = ['zlib', 'szip', 'zstd', 'bzip2', 'blosc']
+        for c in comp:
+            if opts.get(c):
+                opts['compression'] = c
+            if c in opts:
+                del opts[c]
         if var.chunking() and var.chunking() != 'contiguous':
             opts['chunksizes'] = var.chunking()
         if hasattr(var, '_FillValue'):
@@ -191,7 +199,12 @@ if __name__ == '__main__':
         spath = Path(src)
         n = args.cut_dirs + 1 if spath.is_absolute() else args.cut_dirs
         dst = Path(args.prefix).joinpath(*spath.parts[n:])
-        f = processzip(src)
+        try:
+            f = processzip(src)
+            os.makedirs(dst.parent, exist_ok=True)
+            shutil.move(f, dst)
 
-        os.makedirs(dst.parent, exist_ok=True)
-        shutil.move(f, dst)
+        except zipfile.BadZipFile as e:
+            print(f'ERROR {e}: {src}')
+
+
