@@ -6,6 +6,9 @@ included at present:
 * `s3testpp` - test program allowing control over aggregation settings
 * `s3regrid` - program to produce minimal volume "SLSTR-Lite" files
 
+Code can be obtained from:
+* github: https://github.com/surftemp/slstr-preprocessor
+* zenodo: https://zenodo.org/record/6566799
 
 ## Introduction
 
