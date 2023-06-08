@@ -1,30 +1,38 @@
+# Customise for your system, you will need netcdf libraries installed
+FC = gfortran
+INCLUDES = -I/usr/lib64/gfortran/modules
+LDFLAGS = -L/usr/local/lib
+LDLIBS = -lnetcdff
 
 ifdef DEBUG
-    COMPILE_FLAGS = -g -fbounds-check
+    FC_FLAGS = -Og -g -fcheck=all
 else
-    COMPILE_FLAGS = -O3
+    FC_FLAGS = -O2
 endif
 
-# Customise for your system, you will need netcdf libraries installed
-FORTRAN = gfortran
-INCDIRS = -I/usr/local/include
-LIBDIRS = -L/usr/local/lib
 
-all: Preprocess_SLSTR
-
-SLSTR_Preprocessor.o: SLSTR_Preprocessor.f90 GbcsPath.o
-	$(FORTRAN) $(COMPILE_FLAGS) $(INCDIRS) -c -o SLSTR_Preprocessor.o SLSTR_Preprocessor.f90
-
-Preprocess_SLSTR.o: Preprocess_SLSTR.f90 SLSTR_Preprocessor.o GbcsPath.o
-	$(FORTRAN) $(COMPILE_FLAGS) $(INCDIRS) -c -o Preprocess_SLSTR.o Preprocess_SLSTR.f90
-
-GbcsPath.o:GbcsPath.f90
-	$(FORTRAN) $(COMPILE_FLAGS) $(INCDIRS) -c -o GbcsPath.o GbcsPath.f90
-
-Preprocess_SLSTR: SLSTR_Preprocessor.o Preprocess_SLSTR.o GbcsPath.o
-	$(FORTRAN) $(LIBDIRS) $(LDFLAGS) -lnetcdff Preprocess_SLSTR.o SLSTR_Preprocessor.o GbcsPath.o -o Preprocess_SLSTR
+all: s3testpp s3regrid
 
 clean:
-	rm -f Preprocess_SLSTR
-	rm -f *.o
-	rm -f *.mod
+	$(RM) s3testpp s3regrid
+	$(RM) *.o *.mod
+
+s3testpp: s3testpp.o SLSTR_Preprocessor.o GbcsPath.o
+s3regrid: s3regrid.o GbcsKinds.o GbcsNetCDF.o GbcsPath.o SLSTR_Preprocessor.o
+
+# Dependencies
+SLSTR_Preprocessor.o: SLSTR_Preprocessor.f90 GbcsPath.o
+s3testpp.o: s3testpp.f90 SLSTR_Preprocessor.o GbcsPath.o
+GbcsPath.o: GbcsPath.f90
+GbcsKinds.o: GbcsKinds.f90
+GbcsNetCDF.o: GbcsNetCDF.f90
+s3regrid.o: s3regrid.f90 GbcsKinds.o GbcsNetCDF.o GbcsPath.o SLSTR_Preprocessor.o
+
+
+# Default rules
+%.o : %.f90
+	$(FC) $(FC_FLAGS) $(INCLUDES) -c $< -o $@
+
+# Always link using Fortran
+LINK.o = $(FC) $(FC_FLAGS) $(LDFLAGS)
+# Alternatively we could use explicit: $(FC) $(LDFLAGS) $^ $(LDLIBS) -o $@

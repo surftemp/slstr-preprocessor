@@ -1,7 +1,7 @@
 !--------------------------------------------------------------------------------------------
-!P+ Preprocess_SLSTR
+!P+ s3testpp
 ! NAME:
-!     Preprocess_SLSTR
+!     s3testpp
 !
 ! PURPOSE:
 !
@@ -34,9 +34,8 @@
 !     Written by:  Niall McCarroll 12/01/21
 !                University of Reading
 !
-!  Copyright 2020 Chris Merchant, Owen Embury, and Claire Bulgin
-!  The Institute of Atmospheric and Environmental Science
-!  The University of Edinburgh, UK
+!  Copyright 2021 Owen Embury, and Claire Bulgin
+!  Department of Meteorology, University of Reading, UK
 !
 !  This file is part of the GBCS software package.
 !
@@ -472,7 +471,7 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, e
   END DO
 END SUBROUTINE process_view
 
-PROGRAM Preprocess_SLSTR
+PROGRAM s3testpp
   USE SLSTR_Preprocessor
   IMPLICIT NONE
 
@@ -531,4 +530,4 @@ PROGRAM Preprocess_SLSTR
 
   CALL process_view('n',scene_folder,output_folder,simple,stats,effective_k)
   CALL process_view('o',scene_folder,output_folder,simple,stats,effective_k)
-END PROGRAM Preprocess_SLSTR
+END PROGRAM s3testpp
