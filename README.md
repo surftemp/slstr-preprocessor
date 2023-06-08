@@ -16,8 +16,26 @@ scan before being remapped to a regular image grid aligned with the
 satellite track. It is commonly assumed that the 500 m Vis/NIR channels
 can be matched to the IR channels with a simple 2x2 averaging. However,
 this results in misalignments between the two due to the previous mapping
-from measurement to image grid. For details see:
+from measurement to image grid as shown in the example below.
+
+![Example of misalignment along coastline](regrid.png)
+
+Example of misalignment along Norwegian coastline from
 [Bulgin et al. 2023](https://dx.doi.org/10.1016/j.rse.2023.113531)
+* **Top-left**: SLSTR S7 channel shows saw-tooth edge along coastline when
+  viewing data in image grid. These artefacts are due to assuming pixels
+  are on a regular "square" grid - the actual location of each pixel may
+  by up to 1/2 pixel (500 m) from the "grid centre".
+* **Top-right**: SLSTR S6 channel at full higher 500 m resolution. The
+  remapping from measurement to image grid was done at the native
+  resolution so saw-tooth effect is not seen.
+* **Lower-left**: SLSTR S6 coarsened to 1 km using simple 2x2 averaging.
+  Pixels are closer to the nominal grid centres (no saw tooth), but do
+  not correspond to the locations of IR observations.
+* **Lower-tight**: SLSTR S6 remapped to IR pixel locations using this
+  software. Saw-tooth artefacts are now visible along the coastline
+  showing that data are mapped to the correct location for use with
+  1 km channels.
 
 The preprocessor can be used to correctly aggregate channels S1-6 to the
 locations of channels S7-9 using nearest-neighbour algorithm. This works
