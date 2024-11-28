@@ -1009,6 +1009,9 @@ CONTAINS
           n_y = neighbourhood%entries(ir_x,ir_y)%y(ik)
           n_s = neighbourhood%entries(ir_x,ir_y)%source(ik)
           lookup = MISSING_R
+          ! We check the main pixel exception flags and reject pixels which have any bits
+          ! other than the saturation bit set. There is no need to check the orphan pixel
+          ! flags as missing / invalid pixels will not be present.
           SELECT CASE(n_s)
             CASE(MAIN_PIXEL_SOURCE_A)
               IF (IOR(vis_exception_a(n_x,n_y),EXCEPTION_SATURATION) == EXCEPTION_SATURATION) THEN

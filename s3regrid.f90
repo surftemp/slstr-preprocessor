@@ -51,15 +51,62 @@ PROGRAM s3regrid
   ! ---------
   ! Variables
   ! ---------
-  CHARACTER(len=256) :: s3path
+  CHARACTER(len=256) :: s3path, arg
+  LOGICAL :: skiparg
+  LOGICAL :: usebstripe
+  INTEGER :: iarg, ilen, ios
+  INTEGER :: npixel
 
-  CALL GET_COMMAND_ARGUMENT(1, s3path)
+  ! Defaults
+  s3path = ''
+  npixel = 5
+  usebstripe = .FALSE.
 
-  CALL process_view(s3path, 'n', 5)
-  CALL process_view(s3path, 'o', 5)
+  skiparg = .FALSE.
+
+  DO iarg = 1, COMMAND_ARGUMENT_COUNT()
+    IF (skiparg) THEN
+      skiparg = .FALSE.
+      CYCLE
+    END IF
+
+    CALL GET_COMMAND_ARGUMENT(iarg, arg, ilen)
+
+    SELECT CASE(arg(1:ilen))
+    ! -- Set number of pixels to use in regridding
+    CASE('-n')
+      CALL GET_COMMAND_ARGUMENT(iarg+1, arg, ilen)
+      READ(arg, fmt=*, iostat=ios) npixel
+      IF (ios/=0) THEN
+        WRITE(*,*) "s3regrid -n expects integer, got: ", arg(1:ilen)
+        STOP
+      END IF
+      skiparg = .True.
+
+    ! -- Enable use of b-stripe for S4-S6
+    CASE('-b', '--use-bstripe')
+      usebstripe = .True.
+
+    CASE DEFAULT
+      IF (LEN_TRIM(s3path) > 0) THEN
+        WRITE(*,*) "Unexpected command line argument: ", arg(1:ilen)
+        STOP
+      END IF
+      s3path = arg
+
+    END SELECT
+  END DO
+
+  IF (LEN_TRIM(s3path) == 0) THEN
+    WRITE(*,*) "usage: s3regrid [-n N] [-b,--use-bstripe] path"
+    STOP
+  END IF
+
+  CALL process_view(s3path, 'n', npixel, usebstripe)
+  CALL process_view(s3path, 'o', npixel, usebstripe)
 
 CONTAINS
-  SUBROUTINE process_view(path, view, nnear)
+  SUBROUTINE process_view(path, view, nnear, use_bstripe)
     USE netcdf
     USE GbcsKinds
     USE GbcsNetCDF
@@ -72,6 +119,7 @@ CONTAINS
     CHARACTER(LEN=*), INTENT(in) :: path
     CHARACTER(LEN=1), INTENT(in) :: view
     INTEGER,          INTENT(in) :: nnear
+    LOGICAL,          INTENT(in) :: use_bstripe
 
     ! ---------------
     ! Local variables
@@ -82,12 +130,17 @@ CONTAINS
     CHARACTER(len=14) :: name
     CHARACTER(len=64) :: attr_long, attr_name, attr_unit
     INTEGER(KIND=GbcsInt2) :: fill
-    TYPE(NEIGHBOURHOOD_MAP) :: nnmap
+    TYPE(NEIGHBOURHOOD_MAP) :: nnmap, nnmap2
     REAL :: scale, offset
     REAL, ALLOCATABLE, DIMENSION(:,:) :: rads
 
     WRITE(*,*) "Calculating nearest neighbours: ", view
     CALL compute_scene_neighbourhood(path, view, 'a', nnmap)
+    IF (use_bstripe) THEN
+      WRITE(*,*) "Adding b-stripe"
+      CALL compute_scene_neighbourhood(path, view, 'b', nnmap2)
+      CALL merge_neighbourhoods(nnmap, nnmap2)
+    END IF
     irsize = SHAPE(nnmap%entries)
     WRITE(*,*) "Output size: ", irsize
     ALLOCATE(rads(irsize(1), irsize(2)))
@@ -107,7 +160,11 @@ CONTAINS
 
       WRITE(name, '("S", I1, "_radiance_i", A1)') iband, view
       WRITE(*,*) 'Channel: ', name
-      CALL process_scene_band(view, path, iband, rads, nnmap, nnear, FUNCTION_MEAN)
+      IF (use_bstripe .AND. iband > 3) THEN
+        CALL process_scene_band(view, path, iband, rads, nnmap2, nnear*2, FUNCTION_MEAN)
+      ELSE
+        CALL process_scene_band(view, path, iband, rads, nnmap, nnear, FUNCTION_MEAN)
+      END IF
       status = nf90_create(Path_Join(path, name//'.nc'), NF90_NETCDF4, ncid)
       status = nf90_def_dim(ncid, "columns", irsize(1), dim1)
       status = nf90_def_dim(ncid, "rows", irsize(2), dim2)
