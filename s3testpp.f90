@@ -262,7 +262,7 @@ SUBROUTINE show_neighbourhood_stats(neighbourhood, title)
             distance_gt_10 = distance_gt_10 + 1
           END IF
         END IF
-        if (source == NULL_PIXEL_SOURCE) THEN
+        if (source == INVALID_PIXEL) THEN
           null_count = null_count + 1
         ELSE
           ! run integrity checks
@@ -278,12 +278,12 @@ SUBROUTINE show_neighbourhood_stats(neighbourhood, title)
           END IF
 
           ! values at each entry should be ordered by increasing squared distance, check this
-          IF (sqdist > neighbourhood%entries(col,row)%squared_distances(k)) THEN
+          IF (sqdist > neighbourhood%entries(col,row)%d(k)) THEN
             PRINT *, 'ERROR - distances in neighbourhood are out of order'
-            PRINT *, neighbourhood%entries(col,row)%squared_distances
+            PRINT *, neighbourhood%entries(col,row)%d
             STOP
           END IF
-          sqdist = neighbourhood%entries(col,row)%squared_distances(k)
+          sqdist = neighbourhood%entries(col,row)%d(k)
 
           IF (sqdist > MAX_NEIGHBOUR_DISTANCE*MAX_NEIGHBOUR_DISTANCE) THEN
             PRINT *, 'ERROR - distances in neighbourhood exceeds maximum'
@@ -424,12 +424,12 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, e
       PRINT *, 'effective neighbourhood size', effective_k
       PRINT *, 'max distance (m)', MAX_NEIGHBOUR_DISTANCE
     END IF
-    CALL compute_scene_neighbourhood(view_type,scene_folder,neighbourhood_a,'a')
+    CALL compute_scene_neighbourhood(scene_folder, view_type, 'a', neighbourhood_a)
     IF (stats) THEN
       CALL show_neighbourhood_stats(neighbourhood_a, &
               'Neighbourhood A stats - view='//view_type)
     END IF
-    CALL compute_scene_neighbourhood(view_type,scene_folder,neighbourhood_ab,'b')
+    CALL compute_scene_neighbourhood(scene_folder, view_type, 'b', neighbourhood_ab)
     IF (stats) THEN
       CALL show_neighbourhood_stats(neighbourhood_ab, &
               'Neighbourhood B stats - view='//view_type)

@@ -87,7 +87,7 @@ CONTAINS
     REAL, ALLOCATABLE, DIMENSION(:,:) :: rads
 
     WRITE(*,*) "Calculating nearest neighbours: ", view
-    CALL compute_scene_neighbourhood(view, path, nnmap, 'a')
+    CALL compute_scene_neighbourhood(path, view, 'a', nnmap)
     irsize = SHAPE(nnmap%entries)
     WRITE(*,*) "Output size: ", irsize
     ALLOCATE(rads(irsize(1), irsize(2)))
