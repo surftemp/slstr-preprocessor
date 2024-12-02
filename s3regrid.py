@@ -156,9 +156,19 @@ def renamenc(src):
     os.rename(src, src.path[:-6] + subs[1] + '.nc')
 
 
-def processzip(filename):
+def processzip(filename, useb=True, spt_chans=None):
     """
     Process an input SLSTR zip file to generate an SLSTR-Lite product.
+    Parameters
+    ----------
+    filename :  str
+        SLSTR L1b zip files to process
+
+    useb : bool
+        Include b-stripe data for channels S4-S6
+
+    spt_chans : str
+        Sub pixel texture argument to pass to s3regrid
     """
     zipname = os.path.basename(filename)
     safename = zipname.replace('.zip', '.SEN3')
@@ -170,7 +180,14 @@ def processzip(filename):
         zip.extractall(_workdir)
 
     safedir = os.path.join(_workdir, safename)
-    subprocess.run([findexec('s3regrid'), safedir, '-b'], check=True)
+    s3cmd = [findexec('s3regrid')]
+    if useb:
+        s3cmd.append('-b')
+    if spt_chans:
+        s3cmd.append('-s')
+        s3cmd.append(spt_chans)
+    s3cmd.append(safedir)
+    subprocess.run(s3cmd, check=True)
 
     # Copy global attributes including resolution from S9_BT
     for v in 'no':
@@ -235,9 +252,17 @@ if __name__ == '__main__':
     parser.add_argument('file', nargs='+', help='Input SLSTR zip file(s)')
     parser.add_argument('--cut-dirs', type=int, default=0, help='Cut this number of directory components')
     parser.add_argument('--prefix', default='.', help='Output directory prefix')
+    parser.add_argument('--no-bstripe', dest='bstripe', action='store_false', help="Do not include b-stripe data in S4-S6")
+    parser.add_argument('-s', '--standard-deviation', dest='chans', help='Channels for sub-pixel texture')
     args = parser.parse_args()
 
+    # Do not include filename / path arguments in history as they can
+    # be very long and are not useful to end users.
     _history = datetime.datetime.now(datetime.UTC).strftime('  %Y-%m-%dT%H:%M:%SZ') + ": s3regrid.py"
+    if not args.bstripe:
+        _history += ' --no-bstripe'
+    if args.chans:
+        _history += f' -s {args.chans}'
     time0 = time.monotonic()
     nfile = 0
     for src in args.file:
@@ -247,7 +272,7 @@ if __name__ == '__main__':
         n = args.cut_dirs + 1 if spath.is_absolute() else args.cut_dirs
         dst = Path(args.prefix).joinpath(*spath.parts[n:])
         try:
-            f = processzip(src)
+            f = processzip(src, args.bstripe, args.chans)
 
         except zipfile.BadZipFile as e:
             print(f'ERROR {e}: {src}')

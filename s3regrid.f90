@@ -55,12 +55,15 @@ PROGRAM s3regrid
   LOGICAL :: skiparg
   LOGICAL :: usebstripe
   INTEGER :: iarg, ilen, ios
+  INTEGER :: i1, i2, nchan
   INTEGER :: npixel
+  INTEGER, DIMENSION(6) :: chans
 
   ! Defaults
   s3path = ''
   npixel = 5
   usebstripe = .FALSE.
+  chans = -1
 
   skiparg = .FALSE.
 
@@ -79,7 +82,7 @@ PROGRAM s3regrid
       READ(arg, fmt=*, iostat=ios) npixel
       IF (ios/=0) THEN
         WRITE(*,*) "s3regrid -n expects integer, got: ", arg(1:ilen)
-        STOP
+        STOP 1
       END IF
       skiparg = .True.
 
@@ -87,10 +90,40 @@ PROGRAM s3regrid
     CASE('-b', '--use-bstripe')
       usebstripe = .True.
 
+    CASE('-s', '--standard-deviation')
+      skiparg = .True.
+      CALL GET_COMMAND_ARGUMENT(iarg+1, arg, ilen)
+      IF (arg == 'all') THEN
+        chans = [1, 2, 3, 4, 5, 6]
+        CYCLE
+      END IF
+      ! Count number of channels listed
+      nchan = 1
+      i1 = 1
+      DO
+        i2 = INDEX(arg(i1:), ',')
+        IF (i2 == 0) EXIT
+        i1 = i1 + i2
+        nchan = nchan + 1
+      END DO
+      READ(arg, *, iostat=ios) chans(1:nchan)
+      IF (nchan > 6 .OR. ios /= 0) THEN
+        WRITE(*,*) "Error parsing channel list: ", arg(1:ilen)
+        STOP 1
+      END IF
+      IF (ANY(chans(1:nchan) < 1 .OR. chans(1:nchan) > 6)) THEN
+        WRITE(*,*) "Invalid channel numbers: ", chans(1:nchan)
+        STOP 1
+      END IF
+
     CASE DEFAULT
+      IF (arg(1:1) == '-') THEN
+        WRITE(*,*) "invalid option: ", TRIM(arg)
+        STOP 1
+      END IF
       IF (LEN_TRIM(s3path) > 0) THEN
         WRITE(*,*) "Unexpected command line argument: ", arg(1:ilen)
-        STOP
+        STOP 1
       END IF
       s3path = arg
 
@@ -98,15 +131,15 @@ PROGRAM s3regrid
   END DO
 
   IF (LEN_TRIM(s3path) == 0) THEN
-    WRITE(*,*) "usage: s3regrid [-n N] [-b,--use-bstripe] path"
-    STOP
+    WRITE(*,*) "usage: s3regrid [-n N] [-b,--use-bstripe] [-s,--standard-deviation CHANNELS] path"
+    STOP 1
   END IF
 
-  CALL process_view(s3path, 'n', npixel, usebstripe)
-  CALL process_view(s3path, 'o', npixel, usebstripe)
+  CALL process_view(s3path, 'n', npixel, usebstripe, chans)
+  CALL process_view(s3path, 'o', npixel, usebstripe, chans)
 
 CONTAINS
-  SUBROUTINE process_view(path, view, nnear, use_bstripe)
+  SUBROUTINE process_view(path, view, nnear, use_bstripe, channels)
     USE netcdf
     USE GbcsKinds
     USE GbcsPath
@@ -119,6 +152,7 @@ CONTAINS
     CHARACTER(LEN=1), INTENT(in) :: view        !< View to process ('n' or 'o')
     INTEGER,          INTENT(in) :: nnear       !< Number of pixels to use in average
     LOGICAL,          INTENT(in) :: use_bstripe !< Include b-stripe
+    INTEGER, DIMENSION(:), INTENT(in) :: channels !< Channels to calculate subpixel texture
 
     ! ---------------
     ! Local variables
@@ -132,6 +166,7 @@ CONTAINS
     TYPE(NEIGHBOURHOOD_MAP) :: nnmap, nnmap2
     REAL :: scale, offset
     REAL, ALLOCATABLE, DIMENSION(:,:) :: rads, stdd
+    LOGICAL :: calc_std
 
     WRITE(*,'(A,I2,A,A)') "Calculating ", nnear, " nearest neighbours: ", view
     CALL compute_scene_neighbourhood(path, view, 'a', nnmap)
@@ -143,9 +178,13 @@ CONTAINS
     irsize = SHAPE(nnmap%entries)
     WRITE(*,'(A,I4," x ",I4)') " Output size: ", irsize
     ALLOCATE(rads(irsize(1), irsize(2)))
-    ALLOCATE(stdd(irsize(1), irsize(2)))
 
     DO iband = 1,6
+      ! Do we need to write subpixel texture for this channel
+      calc_std = ANY(channels == iband)
+      IF (calc_std .AND. .NOT. ALLOCATED(stdd)) ALLOCATE(stdd(irsize(1), irsize(2)))
+      IF (ALLOCATED(stdd) .AND. .NOT. calc_std) DEALLOCATE(stdd)
+
       ! Read attributes from input radiance
       WRITE(name, '("S", I1, "_radiance_a", A1)') iband, view
       status = nf90_open(Path_Join(path, TRIM(name)//'.nc'), NF90_NOWRITE, ncid)
@@ -181,7 +220,7 @@ CONTAINS
       status = nf90_put_att(ncid, v_rad, 'units', attr_unit)
 
       ! Create radiance standard deviation variable
-      IF (ALLOCATED(stdd)) THEN
+      IF (calc_std) THEN
         WRITE(name, '("S", I1, "_stddev_i", A1)') iband, view
         status = nf90_def_var(ncid, name, nf90_short, [dim1, dim2], v_std, &
                               chunksizes=irsize, deflate_level=2, shuffle=.True.)
@@ -206,7 +245,7 @@ CONTAINS
       CALL Pack_Data(rads, offset, scale, -3000, 32767, INT(fill))
       status = nf90_put_var(ncid, v_rad, rads)
 
-      IF (ALLOCATED(stdd)) THEN
+      IF (calc_std) THEN
         CALL Pack_Data(stdd, 0.0, scale, 0, 32767, INT(fill))
         status = nf90_put_var(ncid, v_std, stdd)
       END IF
