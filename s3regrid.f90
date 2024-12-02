@@ -127,7 +127,7 @@ CONTAINS
     INTEGER :: iband
     INTEGER, DIMENSION(2) :: irsize
     CHARACTER(len=14) :: name
-    CHARACTER(len=64) :: attr_long, attr_name, attr_unit
+    CHARACTER(len=80) :: attr_long, attr_name, attr_unit
     INTEGER(KIND=GbcsInt2) :: fill
     TYPE(NEIGHBOURHOOD_MAP) :: nnmap, nnmap2
     REAL :: scale, offset
@@ -195,6 +195,11 @@ CONTAINS
         status = nf90_put_att(ncid, v_std, 'units', attr_unit)
       END IF
 
+      WRITE(attr_long, '(A,I2,A)') "Regrid to i-stripe using ", nnear, " nearest neighbours."
+      IF (use_bstripe .AND. iband > 3) THEN
+        attr_long = TRIM(attr_long) // " Including b-stripe."
+      END IF
+      status = nf90_put_att(ncid, nf90_global, 's3regrid', attr_long)
       status = nf90_enddef(ncid)
 
       ! Output
