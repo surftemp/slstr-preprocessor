@@ -76,6 +76,14 @@
 MODULE SLSTR_Preprocessor
   IMPLICIT NONE
 
+  PRIVATE
+  PUBLIC :: NEIGHBOURHOOD_MAP
+  PUBLIC :: compute_scene_neighbourhood, merge_neighbourhoods, process_scene_band
+  PUBLIC :: INVALID_PIXEL, MISSING_I, MISSING_R
+  PUBLIC :: MAIN_PIXEL_SOURCE_A, MAIN_PIXEL_SOURCE_B, ORPHAN_PIXEL_SOURCE_A, ORPHAN_PIXEL_SOURCE_B
+  PUBLIC :: MAX_K_NEAREST_NEIGHBOURS, MAX_NEIGHBOUR_DISTANCE
+  PUBLIC :: FUNCTION_MEAN, FUNCTION_SD, FUNCTION_MAX, FUNCTION_MIN_MAX_DIFF
+
   ! ----------------
   ! Module variables
   ! ----------------
@@ -151,8 +159,10 @@ MODULE SLSTR_Preprocessor
 
   !> Define a neighbourhood as an array of entries and metadata on which stripe(s) the neighbourhood is built on
   TYPE NEIGHBOURHOOD_MAP
-    LOGICAL :: include_a_stripe
-    LOGICAL :: include_b_stripe
+    INTEGER :: width = 0
+    INTEGER :: height = 0
+    LOGICAL :: include_a_stripe = .False.
+    LOGICAL :: include_b_stripe = .False.
     TYPE(NEIGHBOURHOOD_ENTRY), ALLOCATABLE, DIMENSION(:,:) :: entries
   END TYPE NEIGHBOURHOOD_MAP
 
@@ -164,6 +174,15 @@ MODULE SLSTR_Preprocessor
     REAL,    ALLOCATABLE, DIMENSION(:,:) :: y     !< Along track pixel coordinate
     INTEGER, ALLOCATABLE, DIMENSION(:,:) :: conf  !< Confidence flags
   END TYPE Locations
+
+  !> Structure to hold input radiances, both image and orphan grids
+  TYPE Radiances
+    INTEGER :: width = 0
+    INTEGER :: height = 0
+    REAL,    DIMENSION(:,:), ALLOCATABLE :: image   !< Image pixels
+    REAL,    DIMENSION(:,:), ALLOCATABLE :: orphan  !< Orphan pixels
+    INTEGER, DIMENSION(:,:), ALLOCATABLE :: status  !< Status flags
+  END TYPE Radiances
 
 CONTAINS
 !------------------------------------------------------------------------------
@@ -201,17 +220,18 @@ CONTAINS
 !       11/11/20  NM  Creation
 !S-
 !------------------------------------------------------------------------------
-  SUBROUTINE handle_err(status)
+  SUBROUTINE handle_err(status, msg)
     USE netcdf
     IMPLICIT NONE
     ! -----------
     ! Arguments
     ! -----------
-    INTEGER, INTENT (IN) :: status
+    INTEGER,          INTENT(in) :: status
+    CHARACTER(LEN=*), INTENT(in) :: msg
 
     IF (status /= nf90_noerr) THEN
-      PRINT *, nf90_strerror(status)
-      STOP "Stopped"
+      WRITE(*,*) nf90_strerror(status), msg
+      STOP 1
     END IF
   END SUBROUTINE handle_err
 
@@ -273,7 +293,7 @@ CONTAINS
     INTEGER :: status
 
     status = nf90_open(path, NF90_NOWRITE, ncid)
-    CALL handle_err(status)
+    CALL handle_err(status, path)
     safe_open = ncid
   END FUNCTION safe_open
 
@@ -337,13 +357,13 @@ CONTAINS
     REAL    :: scale_factor
 
     status = nf90_inq_varid(ncid,name,varid)
-    CALL handle_err(status)
+    CALL handle_err(status, name)
     status = nf90_get_var(ncid,varid,values)
-    CALL handle_err(status)
+    CALL handle_err(status, name)
     status = nf90_get_att(ncid,varid,"scale_factor",scale_factor)
-    CALL handle_err(status)
+    CALL handle_err(status, name)
     status = nf90_get_att(ncid,varid,"_FillValue",file_fill_value)
-    CALL handle_err(status)
+    CALL handle_err(status, name)
     WHERE (values /= file_fill_value)
       values = values * scale_factor
     ELSE WHERE
@@ -416,9 +436,9 @@ CONTAINS
     INTEGER :: status
 
     status = nf90_inq_varid(ncid, field_name, varid)
-    CALL handle_err(status)
+    CALL handle_err(status, field_name)
     status = nf90_get_att(ncid, varid, attr_name, value)
-    CALL handle_err(status)
+    CALL handle_err(status, field_name)
     safe_get_real_attribute = value
 
   END FUNCTION safe_get_real_attribute
@@ -483,9 +503,9 @@ CONTAINS
     INTEGER :: file_fill_value
 
     status = nf90_inq_varid(ncid,name,varid)
-    CALL handle_err(status)
+    CALL handle_err(status, name)
     status = nf90_get_var(ncid,varid,values)
-    CALL handle_err(status)
+    CALL handle_err(status, name)
     status = nf90_get_att(ncid, varid, "_FillValue", file_fill_value)
     IF (status == nf90_noerr) THEN
       WHERE (values == file_fill_value)
@@ -850,12 +870,12 @@ CONTAINS
 !       Fortran-95
 !
 ! CALLING SEQUENCE:
-!       aggregated_value = apply_function(function_code, pixel_values, pixel_value_count)
+!       aggregated_value = apply_function(function_code, pixel_values, n)
 !
 ! ARGUMENTS:
 !>@ARG{function_code, in, INTEGER} the code of the function to apply to neighbourhood, see FUNCTION_* parameters
 !>@ARG{values, in, REAL\, DIMENSION(:)} array containing values to aggregate
-!>@ARG{value_count, in, INTEGER} the number of values in the values array
+!>@ARG{n, in, INTEGER} the number of valid values in the values array
 !
 ! FUNCTION RESULT:
 !>@RES{aggregated_value, REAL} result of applying the function to the array of pixel values
@@ -871,14 +891,14 @@ CONTAINS
 !     17/02/21  NM  Creation
 !F-
 !------------------------------------------------------------------------------
-  PURE FUNCTION apply_function(function_code, values, value_count)
+  PURE FUNCTION apply_function(function_code, values, n)
     IMPLICIT NONE
     ! ---------
     ! Arguments
     ! ---------
     INTEGER,            INTENT(in) :: function_code
     REAL, DIMENSION(:), INTENT(in) :: values
-    INTEGER,            INTENT(in) :: value_count
+    INTEGER,            INTENT(in) :: n
 
     ! ----------------
     ! Function Result
@@ -891,31 +911,33 @@ CONTAINS
     REAL :: vsum, vsumsq
 
     apply_function = MISSING_R
-    IF (value_count <= 0) RETURN
+    IF (n <= 0) RETURN
 
     vsum = 0.0
     vsumsq = 0.0
 
     SELECT CASE (function_code)
       CASE (FUNCTION_MEAN)
-        vsum = SUM(values(1:value_count))
-        apply_function = vsum/value_count
+        vsum = SUM(values(1:n))
+        apply_function = vsum/n
+
       CASE (FUNCTION_SD)
-        IF (value_count > 1) THEN
-          vsum = SUM(values(1:value_count))
-          vsumsq = SUM(values(1:value_count)**2)
-          apply_function = SQRT((vsumsq/value_count) - (vsum/value_count)**2)
+        IF (n > 1) THEN
+          vsum = SUM(values(1:n))
+          vsumsq = SUM(values(1:n)**2)
+          apply_function = SQRT((vsumsq/n) - (vsum/n)**2)
         ELSE
           apply_function = 0
         END IF
+
       CASE (FUNCTION_MAX)
-        apply_function = MAXVAL(values(1:value_count))
+        apply_function = MAXVAL(values(1:n))
+
       CASE (FUNCTION_MIN_MAX_DIFF)
-        apply_function = MAXVAL(values(1:value_count)) - MINVAL(values(1:value_count))
+        apply_function = MAXVAL(values(1:n)) - MINVAL(values(1:n))
     END SELECT
 
   END FUNCTION apply_function
-
 
 
 !------------------------------------------------------------------------------
@@ -933,21 +955,17 @@ CONTAINS
 !       Fortran-95
 !
 ! CALLING SEQUENCE:
-!       CALL apply_neighbours(vis_radiance_a, vis_orphans_a, vis_exception_a, &
-!                             vis_radiance_b, vis_orphans_b, vis_exception_b, &
-!                             neighbourhood, vis_output_radiance, function_code)
+!       CALL apply_neighbours(rads_a, rads_b, neighbourhood, effective_k
+!                             rads_i, function_code, std)
 !
 ! ARGUMENTS:
-!>@ARG{vis_radiance_a, in, REAL\, DIMENSION(:\,:)} matrix of (col,row) radiance band pixels, stripe a
-!>@ARG{vis_orphans_a, in, REAL\, DIMENSION(:\,:)} matrix of (col,row) radiance orphan band pixels, stripe a
-!>@ARG{vis_exception_a, in, INTEGER\, DIMENSION(:\,:)} matrix of (col,row) exception values for radiance band pixels, stripe a
-!>@ARG{vis_radiance_b, in, REAL\, DIMENSION(:\,:)} matrix of (col,row) radiance band pixels, stripe b
-!>@ARG{vis_orphans_b, in, REAL\, DIMENSION(:\,:)} matrix of (col,row) radiance orphan band pixels, stripe b
-!>@ARG{vis_exception_b, in, INTEGER\, DIMENSION(:\,:)} matrix of (col,row) exception values for radiance band pixels, stripe b
+!>@ARG{rads_a, in, Radiances} Input radiances, a-stripe
+!>@ARG{rads_b, in, Radiances} Input radiances, b-stripe
 !>@ARG{neighbourhood, in, NEIGHBOURHOOD_ENTRY\, DIMENSION(:\,:)} the neighbourhood map that was populated by build_neighbourhood_map
 !>@ARG{effective_k, in, INTEGER} use the closest n neighbours, must be less than or equal to MAX_K_NEAREST_NEIGHBOURS
-!>@ARG{vis_output_radiance, inout, REAL\, DIMENSION(:\,:)} matrix of (col,row) to store output aggregated/regridded pixels
-!>@ARG{function_code, in, INTEGER} the name of the function to apply to neighbourhood, see FUNCTION_* parameters
+!>@ARG{rads_i, out, REAL\, DIMENSION(:\,:)} Regridded output radiances, i-stripe
+!>@ARG{function_code, in, INTEGER} Aggregation function to apply to neighbourhood, see FUNCTION_* parameters
+!>@ARG{std, out, REAL\, DIMENSION(:\,:)\, OPTIONAL} Standard deviation of aggregated pixels
 !
 ! CALLS:
 !       apply_function
@@ -965,66 +983,66 @@ CONTAINS
 !     17/02/21  NM  Refactor out apply_function
 !S-
 !------------------------------------------------------------------------------
-  PURE SUBROUTINE apply_neighbours(vis_radiance_a, vis_orphans_a, vis_exception_a, &
-                                   vis_radiance_b, vis_orphans_b, vis_exception_b, &
-                                   neighbourhood, effective_k, vis_output_radiance, function_code)
-
+  PURE SUBROUTINE apply_neighbours(rads_a, rads_b, neighbourhood, effective_k, &
+                                   rads_i, function_code, std)
     IMPLICIT NONE
     ! ---------
     ! Arguments
     ! ---------
-
-    REAL,    DIMENSION(:,:), INTENT(in)    :: vis_radiance_a
-    REAL,    DIMENSION(:,:), INTENT(in)    :: vis_orphans_a
-    INTEGER, DIMENSION(:,:), INTENT(in)    :: vis_exception_a
-    REAL,    DIMENSION(:,:), INTENT(in)    :: vis_radiance_b
-    REAL,    DIMENSION(:,:), INTENT(in)    :: vis_orphans_b
-    INTEGER, DIMENSION(:,:), INTENT(in)    :: vis_exception_b
-    TYPE(NEIGHBOURHOOD_MAP), INTENT(in)    :: neighbourhood
-    INTEGER,                 INTENT(IN)    :: effective_k
-    REAL,    DIMENSION(:,:), INTENT(inout) :: vis_output_radiance
-    INTEGER,                 INTENT(in)    :: function_code
+    TYPE(Radiances),                INTENT(in)  :: rads_a
+    TYPE(Radiances),                INTENT(in)  :: rads_b
+    TYPE(NEIGHBOURHOOD_MAP),        INTENT(in)  :: neighbourhood
+    INTEGER,                        INTENT(in)  :: effective_k
+    REAL, DIMENSION(:,:),           INTENT(out) :: rads_i
+    INTEGER,                        INTENT(in)  :: function_code
+    REAL, DIMENSION(:,:), OPTIONAL, INTENT(out) :: std
 
     ! ---------------
     ! Local Variables
     ! ---------------
-    INTEGER :: ir_x, ir_y, ik, n_x, n_y, n_s
+    INTEGER :: elem, line, ik, n_x, n_y, n_s
     REAL :: lookup
-    INTEGER :: ir_width, ir_height
-
     REAL, DIMENSION(MAX_K_NEAREST_NEIGHBOURS) :: values
     INTEGER :: vcount
+    LOGICAL :: calc_std
 
-    ir_width = SIZE(vis_output_radiance,1)
-    ir_height = SIZE(vis_output_radiance,2)
+    IF (PRESENT(std)) THEN
+      ! This will catch the case where std is not allocated (or wrong size)
+      calc_std = SIZE(rads_i) == SIZE(std)
+    ELSE
+      calc_std = .False.
+    ENDIF
 
     ! Loop over all IR pixels
-    DO ir_y = 1, ir_height
-      DO ir_x = 1, ir_width
+    DO line = 1, neighbourhood%height
+      DO elem = 1, neighbourhood%width
         ! Track the count and sum of the neighbours of the IR pixel
         vcount = 0
         ! Loop over the neighbour indices
         DO ik = 1, effective_k
-          n_x = neighbourhood%entries(ir_x,ir_y)%x(ik)
-          n_y = neighbourhood%entries(ir_x,ir_y)%y(ik)
-          n_s = neighbourhood%entries(ir_x,ir_y)%source(ik)
+          n_x = neighbourhood%entries(elem,line)%x(ik)
+          n_y = neighbourhood%entries(elem,line)%y(ik)
+          n_s = neighbourhood%entries(elem,line)%source(ik)
           lookup = MISSING_R
           ! We check the main pixel exception flags and reject pixels which have any bits
           ! other than the saturation bit set. There is no need to check the orphan pixel
           ! flags as missing / invalid pixels will not be present.
           SELECT CASE(n_s)
             CASE(MAIN_PIXEL_SOURCE_A)
-              IF (IOR(vis_exception_a(n_x,n_y),EXCEPTION_SATURATION) == EXCEPTION_SATURATION) THEN
-                lookup = vis_radiance_a(n_x,n_y)
+              IF (IOR(rads_a%status(n_x,n_y),EXCEPTION_SATURATION) == EXCEPTION_SATURATION) THEN
+                lookup = rads_a%image(n_x,n_y)
               END IF
+
             CASE(ORPHAN_PIXEL_SOURCE_A)
-              lookup = vis_orphans_a(n_x,n_y)
+              lookup = rads_a%orphan(n_x,n_y)
+
             CASE(MAIN_PIXEL_SOURCE_B)
-              IF (IOR(vis_exception_b(n_x,n_y),EXCEPTION_SATURATION) == EXCEPTION_SATURATION) THEN
-                lookup = vis_radiance_b(n_x,n_y)
+              IF (IOR(rads_b%status(n_x,n_y),EXCEPTION_SATURATION) == EXCEPTION_SATURATION) THEN
+                lookup = rads_b%image(n_x,n_y)
               END IF
+
             CASE(ORPHAN_PIXEL_SOURCE_B)
-              lookup = vis_orphans_b(n_x,n_y)
+              lookup = rads_b%orphan(n_x,n_y)
           END SELECT
 
           IF (lookup /= MISSING_R) THEN
@@ -1032,7 +1050,8 @@ CONTAINS
             values(vcount) = lookup
           END IF
         END DO
-        vis_output_radiance(ir_x,ir_y) = apply_function(function_code,values,vcount)
+        rads_i(elem,line) = apply_function(function_code, values, vcount)
+        IF (calc_std) std(elem, line) = apply_function(FUNCTION_SD, values, vcount)
       END DO
     END DO
   END SUBROUTINE apply_neighbours
@@ -1054,12 +1073,12 @@ CONTAINS
 !       Fortran-95
 !
 ! CALLING SEQUENCE:
-!       CALL apply_simple_aggregation(vis_radiance, vis_output_radiance, function_code)
+!       CALL apply_simple_aggregation(rads, vis_output_radiance, function_code)
 !
 ! ARGUMENTS:
-!>@ARG{vis_radiance, in, REAL\, DIMENSION(:\,:)} matrix of (col,row) radiance band pixels
+!>@ARG{rads, in, Radiances} Structure holding input radiances on image and orphan grids
 !>@ARG{vis_output_radiance, inout, REAL\, DIMENSION(:\,:)} matrix of (col,row) to store output aggregated/regridded pixels
-!>@ARG{function_code, in, INTEGER} the name of the function to apply, see FUNCTION_* parameters
+!>@ARG{function_code, in, INTEGER} Aggregation function to apply, see FUNCTION_* parameters
 !
 ! CALLS:
 !       apply_function
@@ -1077,14 +1096,14 @@ CONTAINS
 !     28/06/21  OE  Fix for granules with odd number of scanlines
 !S-
 !------------------------------------------------------------------------------
-  PURE SUBROUTINE apply_simple_aggregation(vis_radiance, vis_output_radiance, function_code)
+  PURE SUBROUTINE apply_simple_aggregation(rads, vis_output_radiance, function_code)
     IMPLICIT NONE
     ! ---------
     ! Arguments
     ! ---------
-    REAL, DIMENSION(:,:), INTENT(in)    :: vis_radiance
-    REAL, DIMENSION(:,:), INTENT(inout) :: vis_output_radiance
-    INTEGER,              INTENT(in)    :: function_code
+    TYPE(Radiances),      INTENT(in)  :: rads
+    REAL, DIMENSION(:,:), INTENT(out) :: vis_output_radiance
+    INTEGER,              INTENT(in)  :: function_code
 
     ! ---------------
     ! Local Variables
@@ -1096,7 +1115,7 @@ CONTAINS
 
     ir_width = SIZE(vis_output_radiance,1)
     ir_height = SIZE(vis_output_radiance,2)
-    vis_height = SIZE(vis_radiance, 2)
+    vis_height = rads%height
 
     ! -- Some granules do not have exactly 2x as many visible scanlines as IR
     !    so check heights of both bands
@@ -1105,14 +1124,14 @@ CONTAINS
         vcount = 0
         DO y_off = -1, 0
           DO x_off = -1, 0
-            vis_value = vis_radiance(2*ir_x+x_off, 2*ir_y+y_off)
+            vis_value = rads%image(2*ir_x+x_off, 2*ir_y+y_off)
             IF (vis_value /= MISSING_R) THEN
               vcount = vcount + 1
               values(vcount) = vis_value
             END IF
           END DO
         END DO
-        vis_output_radiance(ir_x,ir_y) = apply_function(function_code,values,vcount)
+        vis_output_radiance(ir_x,ir_y) = apply_function(function_code, values, vcount)
       END DO
     END DO
 
@@ -1121,13 +1140,13 @@ CONTAINS
       DO ir_x=1, ir_width
         vcount = 0
         DO x_off = -1, 0
-          vis_value = vis_radiance(2*ir_x+x_off, 2*ir_y-1)
+          vis_value = rads%image(2*ir_x+x_off, 2*ir_y-1)
           IF (vis_value /= MISSING_R) THEN
             vcount = vcount + 1
             values(vcount) = vis_value
           END IF
         END DO
-        vis_output_radiance(ir_x,ir_y) = apply_function(function_code,values,vcount)
+        vis_output_radiance(ir_x,ir_y) = apply_function(function_code, values, vcount)
       END DO
     END IF
 
@@ -1148,17 +1167,14 @@ CONTAINS
 !       Fortran-95
 !
 ! CALLING SEQUENCE:
-!       CALL load_radiance_data(path, view, band, stripe, &
-!                               vis_radiance, vis_orphans, vis_exception)
+!       CALL load_radiance_data(path, view, band, stripe, rads)
 !
 ! ARGUMENTS:
 !>@ARG{path, in, CHARACTER(LEN=*)} path to a folder storing the various files from an SLSTR scene
 !>@ARG{view, in, CHARACTER(LEN=*)} 'o' for oblique view or 'n' for nadir view
 !>@ARG{band, in, INTEGER} the radiance band to process, in the range 1 to 6
 !>@ARG{stripe, in, CHARACTER(1)} the stripe which the cartesian data represents, 'a' or 'b'
-!>@ARG{vis_radiance, out, REAL\, DIMENSION(:\,:)\, ALLOCATABLE} (output) 2D array to hold the output visible pixels
-!>@ARG{vis_orphans, out, REAL\, DIMENSION(:\,:)\, ALLOCATABLE} (output) 2D array to hold the output orphan pixels
-!>@ARG{vis_exception, out, REAL\, DIMENSION(:\,:)\, ALLOCATABLE} (output) 2D array to hold the output exception values
+!>@ARG{rads, out, Radiances} Structure holding output radiances on image and orphan grids
 !
 ! CALLS:
 !       safe_open
@@ -1178,27 +1194,24 @@ CONTAINS
 !     4/02/21  NM  Creation
 !S-
 !------------------------------------------------------------------------------
-  SUBROUTINE load_radiance_data(path, view, band, stripe, &
-                                vis_radiance, vis_orphans, vis_exception)
+  SUBROUTINE load_radiance_data(path, view, band, stripe, rads)
     USE GbcsPath
     USE netcdf
     IMPLICIT NONE
     ! ---------
     ! Arguments
     ! ---------
-    CHARACTER(LEN=*),                     INTENT(in) :: path
-    CHARACTER(LEN=*),                     INTENT(in) :: view
-    INTEGER,                              INTENT(in) :: band
-    CHARACTER(LEN=1),                     INTENT(in) :: stripe
-    REAL,    DIMENSION(:,:), ALLOCATABLE, INTENT(out) :: vis_radiance
-    REAL,    DIMENSION(:,:), ALLOCATABLE, INTENT(out) :: vis_orphans
-    INTEGER, DIMENSION(:,:), ALLOCATABLE, INTENT(out) :: vis_exception
+    CHARACTER(LEN=*),         INTENT(in)  :: path
+    CHARACTER(LEN=*),         INTENT(in)  :: view
+    INTEGER,                  INTENT(in)  :: band
+    CHARACTER(LEN=1),         INTENT(in)  :: stripe
+    TYPE(Radiances),          INTENT(out) :: rads
 
     ! ---------------
     ! Local Variables
     ! ---------------
-    INTEGER :: ncid, dimid, status
-    INTEGER :: width, height, orphans
+    INTEGER :: ncid, status
+    INTEGER :: orphans
     CHARACTER(40) :: orphan_name, radiance_name, exception_name
 
 
@@ -1209,17 +1222,17 @@ CONTAINS
     ncid = safe_open(Path_Join(path, TRIM(radiance_name)//'.nc'))
 
     ! Work out the sizes of the arrays
-    width = safe_get_dimlen(ncid, 'columns')
-    height = safe_get_dimlen(ncid, 'rows')
+    rads%width = safe_get_dimlen(ncid, 'columns')
+    rads%height = safe_get_dimlen(ncid, 'rows')
     orphans = safe_get_dimlen(ncid, 'orphan_pixels')
 
-    ALLOCATE(vis_radiance(width, height), &
-             vis_orphans(orphans, height), &
-             vis_exception(width, height))
+    ALLOCATE(rads%image(rads%width, rads%height), &
+             rads%orphan(orphans, rads%height), &
+             rads%status(rads%width, rads%height))
 
-    CALL safe_get_real_data(ncid, TRIM(radiance_name), vis_radiance, MISSING_R)
-    CALL safe_get_real_data(ncid, TRIM(orphan_name), vis_orphans, MISSING_R)
-    CALL safe_get_int_data(ncid, TRIM(exception_name), vis_exception, MISSING_I)
+    CALL safe_get_real_data(ncid, TRIM(radiance_name), rads%image, MISSING_R)
+    CALL safe_get_real_data(ncid, TRIM(orphan_name), rads%orphan, MISSING_R)
+    CALL safe_get_int_data(ncid, TRIM(exception_name), rads%status, MISSING_I)
     status = nf90_close(ncid)
 
   END SUBROUTINE load_radiance_data
@@ -1253,7 +1266,7 @@ CONTAINS
 !                (COL,ROW) on the IR grid.  This will be exactly half the width and height of the vis_radiance array
 !>@ARG{neighborhood, in, NEIGHBOURHOOD_MAP} the neighbourhood map that has been constructed
 !>@ARG{effective_k, in, INTEGER} use the closest n neighbours, must be less than or equal to MAX_K_NEAREST_NEIGHBOURS
-!>@ARG{function_code, in, INTEGER} the name of the function to apply, see FUNCTION_* parameters
+!>@ARG{function_code, in, INTEGER\, OPTIONAL} Aggregation function to apply, see FUNCTION_* parameters
 !
 ! CALLS:
 !       load_radiance_data
@@ -1286,28 +1299,34 @@ CONTAINS
 !S-
 !------------------------------------------------------------------------------
   SUBROUTINE process_scene_band(path, view, band, vis_ir_radiance, &
-                                neighbourhood, effective_k, function_code)
+                                neighbourhood, effective_k, function_code, std)
     IMPLICIT NONE
     ! ---------
     ! Arguments
     ! ---------
-    CHARACTER(LEN=*),        INTENT(in)    :: path
-    CHARACTER(LEN=*),        INTENT(in)    :: view
-    INTEGER,                 INTENT(in)    :: band
-    REAL,    DIMENSION(:,:), INTENT(inout) :: vis_ir_radiance
-    TYPE(NEIGHBOURHOOD_MAP), INTENT(in)    :: neighbourhood
-    INTEGER,                 INTENT(IN)    :: effective_k
-    INTEGER,                 INTENT(in)    :: function_code
+    CHARACTER(LEN=*),               INTENT(in)  :: path
+    CHARACTER(LEN=*),               INTENT(in)  :: view
+    INTEGER,                        INTENT(in)  :: band
+    REAL, DIMENSION(:,:),           INTENT(out) :: vis_ir_radiance
+    TYPE(NEIGHBOURHOOD_MAP),        INTENT(in)  :: neighbourhood
+    INTEGER,                        INTENT(in)  :: effective_k
+    INTEGER,              OPTIONAL, INTENT(in)  :: function_code
+    REAL, DIMENSION(:,:), OPTIONAL, INTENT(out) :: std
 
     ! ---------------
     ! Local Variables
     ! ---------------
-    REAL, ALLOCATABLE, DIMENSION(:,:) :: vis_radiance_a, vis_radiance_b
-    REAL, ALLOCATABLE, DIMENSION(:,:) :: vis_orphans_a, vis_orphans_b
-    INTEGER, ALLOCATABLE, DIMENSION(:,:) :: vis_exception_a, vis_exception_b
+    TYPE(Radiances) :: stripe_a, stripe_b
+    INTEGER :: fcode
 
-    IF (function_code < FUNCTION_MEAN .or. function_code > FUNCTION_MIN_MAX_DIFF) THEN
-        PRINT *, 'Unrecognized function code', function_code
+    IF (PRESENT(function_code)) THEN
+      fcode = function_code
+    ELSE
+      fcode = FUNCTION_MEAN
+    END IF
+
+    IF (fcode < FUNCTION_MEAN .or. fcode > FUNCTION_MIN_MAX_DIFF) THEN
+        PRINT *, 'Unrecognized function code', fcode
         RETURN
     END IF
 
@@ -1319,20 +1338,18 @@ CONTAINS
     IF (ALLOCATED(neighbourhood%entries)) THEN
       ! if the neighbourhood contains a-stripe neighbours, then load radiance data from that stripe
       IF (neighbourhood%include_a_stripe) THEN
-        CALL load_radiance_data(path,view,band,'a',vis_radiance_a,vis_orphans_a,vis_exception_a)
+        CALL load_radiance_data(path, view, band, 'a', stripe_a)
       END IF
 
       ! if the neighbourhood contains b-stripe neighbours, then load radiance data from that stripe
       IF (neighbourhood%include_b_stripe) THEN
-        CALL load_radiance_data(path,view,band,'b',vis_radiance_b,vis_orphans_b,vis_exception_b)
+        CALL load_radiance_data(path, view, band, 'b', stripe_b)
       END IF
 
-      CALL apply_neighbours(vis_radiance_a,vis_orphans_a,vis_exception_a, &
-              vis_radiance_b,vis_orphans_b,vis_exception_b, &
-              neighbourhood,effective_k,vis_ir_radiance,function_code)
+      CALL apply_neighbours(stripe_a, stripe_b, neighbourhood, effective_k, vis_ir_radiance, fcode, std)
     ELSE
-      CALL load_radiance_data(path,view,band,'a',vis_radiance_a,vis_orphans_a,vis_exception_a)
-      CALL apply_simple_aggregation(vis_radiance_a,vis_ir_radiance,function_code)
+      CALL load_radiance_data(path, view, band, 'a', stripe_a)
+      CALL apply_simple_aggregation(stripe_a, vis_ir_radiance, fcode)
     END IF
 
   END SUBROUTINE process_scene_band
@@ -1494,18 +1511,15 @@ CONTAINS
     ! ---------------
     ! Local Variables
     ! ---------------
-    INTEGER :: width, height, x, y, i, source
-
-    width = SIZE(neighbourhood_1_in%entries,1)
-    height = SIZE(neighbourhood_1_in%entries,2)
+    INTEGER :: x, y, i
 
     neighbourhood_2_inout%include_a_stripe = neighbourhood_1_in%include_a_stripe .or. neighbourhood_2_inout%include_a_stripe
     neighbourhood_2_inout%include_b_stripe = neighbourhood_1_in%include_b_stripe .or. neighbourhood_2_inout%include_b_stripe
 
     ! Merge sort would be more efficient here as the input neighbourhoods are already sorted
     ! However this would only save a second or so at most, so about 1-2% of the overall execution time
-    DO x = 1,width
-      DO y = 1, height
+    DO y = 1, neighbourhood_1_in%height
+      DO x = 1, neighbourhood_1_in%width
 
         ! now insert cells from the first neighbourhood into the second
         DO i = 1, neighbourhood_1_in%entries(x,y)%n
@@ -1673,10 +1687,12 @@ CONTAINS
     ir_height = safe_get_dimlen(ir_ncid, 'rows')
 
     ! Allocate the arrays for each data structure
+    neighbourhood%width = ir_width
+    neighbourhood%height = ir_height
     ALLOCATE(neighbourhood%entries(ir_width,ir_height))
     CALL Allocate_Locations(ir_width, ir_height, align_cosmetic_pixels, ir_cartesian)
-    CALL Allocate_Locations(visible_width,visible_height, .True., main_cartesian)
-    CALL Allocate_Locations(orphan_width,visible_height, .False., orphan_cartesian)
+    CALL Allocate_Locations(visible_width, visible_height, .True., main_cartesian)
+    CALL Allocate_Locations(orphan_width, visible_height, .False., orphan_cartesian)
 
    ! Load the cartesian coordinates arrays and flags from the scene
     CALL safe_get_real_data(vis_ncid, 'x_'//stripe//view, main_cartesian%x, MISSING_R)

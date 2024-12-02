@@ -1,5 +1,5 @@
 !--------------------------------------------------------------------------------------------
-!P+ s3testpp
+!P+
 ! NAME:
 !     s3testpp
 !
@@ -55,6 +55,20 @@
 !
 !P-
 !--------------------------------------------------------------------------------------------
+  SUBROUTINE handle_err(status)
+    USE netcdf
+    IMPLICIT NONE
+    ! -----------
+    ! Arguments
+    ! -----------
+    INTEGER, INTENT (IN) :: status
+
+    IF (status /= nf90_noerr) THEN
+      PRINT *, nf90_strerror(status)
+      STOP "Stopped"
+    END IF
+  END SUBROUTINE handle_err
+
 
 !------------------------------------------------------------------------------
   !S+
@@ -377,7 +391,7 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, e
   ! ---------------
   ! Local Variables
   ! ---------------
-  INTEGER :: ir_width, ir_height, band, rad_ncid, status
+  INTEGER :: ir_width, ir_height, band
 
   CHARACTER(1) :: band_str
   CHARACTER(256) :: output_field_name
@@ -441,9 +455,7 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, e
     END IF
   END IF
 
-  rad_ncid = safe_open(TRIM(scene_folder)//'/'//'S1_radiance_a'//view_type//'.nc')
-  fill_value = safe_get_real_attribute(rad_ncid,'S1_radiance_a'//view_type,'_FillValue')
-  status = nf90_close(rad_ncid)
+  fill_value = -32768
 
   DO band = 1,6
     WRITE(band_str,'(I1)') band
@@ -451,7 +463,7 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, e
 
     DO function_index = 1,4
       IF (band > 3) THEN
-        ! bands 4,5,6 should have data avaialble for both a and b stripes
+        ! bands 4,5,6 should have data available for both a and b stripes
         CALL process_scene_band(view_type,scene_folder,band,vis_output_radiance, &
                 neighbourhood_ab,effective_k,functions(function_index))
       ELSE
