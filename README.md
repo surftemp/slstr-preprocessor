@@ -110,7 +110,7 @@ minimise the size of the output files the wrapper will also:
 
 
 ### Usage
-`s3regrid.py [-h] [--cut-dirs CUT_DIRS] [--prefix PREFIX] file [file ...]`
+`s3regrid.py [-h] [--cut-dirs CUT_DIRS] [--prefix PREFIX] [--no-bstripe] [-s CHANS] file [file ...]`
 
 Positional arguments:
 * `file` : Input SLSTR L1b zip file(s)
@@ -119,6 +119,8 @@ Options:
  * `-h`, `--help` : show this help message and exit
  * `--cut-dirs CUT_DIRS` : Cut this number of directory components
  * `--prefix PREFIX` : Output directory prefix (defult current directory)
+ * `--no-bstripe` : Do not include b-stripe data in S4-S6
+ * `-s CHANS, --standard-deviation CHANS` : Channels for sub-pixel texture
 
 ### Example
 
