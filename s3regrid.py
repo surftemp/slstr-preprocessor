@@ -26,6 +26,7 @@ Example:
 
 import argparse
 import atexit
+import datetime
 import os
 from pathlib import Path
 import signal
@@ -33,11 +34,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 import netCDF4
 
 _workdir = tempfile.mkdtemp()   # Working directory for temporary files
 
+_citation = "Embury, O., & McCarroll, N. (2023). surftemp/slstr-preprocessor: s3regrid (v1.1.0). Zenodo. https://doi.org/10.5281/zenodo.8017576"
+_history = "s3regrid.py"
 
 @atexit.register
 def _final_cleanup():
@@ -71,7 +75,6 @@ def findexec(name):
     Look for the s3regrid executable. Default location is same as
     this script. Otherwise search the PATH environment variable
     """
-    # exec = os.path.join(os.path.dirname(sys.path[0]), 'bin', name)
     exec = os.path.join(sys.path[0], name)
     if os.path.isfile(exec):
         return exec
@@ -82,10 +85,25 @@ def findexec(name):
     return name
 
 
-def replacenc(filename, vars=None):
+def replacenc(filename, vars=None, drop=[]):
     """
     Replace the specified netCDF file with a copy which only contains the
     listed variables
+
+    Parameters
+    ----------
+    filename :  str
+        netCDF file to replace
+
+    vars : list
+        list of variables to copy from input file. Setting vars to empty list `[]`
+        will create an empty file with just dimensions and global attributes of
+        the original. Setting vars to None will copy all variables to the output
+        (unless explicitly excluded with `drop`)
+
+    drop : list
+        list of variables to exclude from input file. Will only be used if
+        `vars=None`
     """
     src = netCDF4.Dataset(filename)
     dst = netCDF4.Dataset(filename+'_copy', 'w')
@@ -97,6 +115,7 @@ def replacenc(filename, vars=None):
             dst.createDimension(dim, len(src.dimensions[dim]))
     if vars is None:
         vars = list(src.variables)
+        vars = [v for v in vars if v not in drop]
     for v in vars:
         var = src.variables[v]
         opts = var.filters() or {}
@@ -138,6 +157,9 @@ def renamenc(src):
 
 
 def processzip(filename):
+    """
+    Process an input SLSTR zip file to generate an SLSTR-Lite product.
+    """
     zipname = os.path.basename(filename)
     safename = zipname.replace('.zip', '.SEN3')
     with zipfile.ZipFile(filename) as zip:
@@ -148,12 +170,25 @@ def processzip(filename):
         zip.extractall(_workdir)
 
     safedir = os.path.join(_workdir, safename)
-    subprocess.run([findexec('s3regrid'), safedir])
+    subprocess.run([findexec('s3regrid'), safedir, '-b'], check=True)
 
     # Copy global attributes including resolution from S9_BT
     for v in 'no':
         with netCDF4.Dataset(os.path.join(safedir, f'S9_BT_i{v}.nc')) as nc:
             attrs = nc.__dict__
+        # Append s3regrid info to relevant attributes
+        attrs['comment'] = "SLSTR-Lite product"
+        if 'references' in attrs:
+            attrs['references'] += ", " + _citation
+        else:
+            attrs['references'] = _citation
+        if 'history' in attrs:
+            if isinstance(attrs['history'], str):
+                attrs['history'] = [attrs['history'], _history]
+            else:
+                attrs['history'].append(_history)
+        else:
+            attrs['history'] = _history
         for c in '123456':
             with netCDF4.Dataset(os.path.join(safedir, f'S{c}_radiance_i{v}.nc'), 'a') as nc:
                 nc.setncatts(attrs)
@@ -175,14 +210,23 @@ def processzip(filename):
             os.remove(f)
 
     # Cartesian and geodetic are the largest remaining files so remove any
-    # variables that are unsed by gbcs
+    # variables that are considered unnecessary for 1-km products
     replacenc(os.path.join(safedir, 'cartesian_in.nc'), [])
     replacenc(os.path.join(safedir, 'cartesian_io.nc'), [])
-    replacenc(os.path.join(safedir, 'geodetic_in.nc'), ['latitude_in', 'longitude_in'])
-    replacenc(os.path.join(safedir, 'geodetic_io.nc'), ['latitude_io', 'longitude_io'])
+    replacenc(os.path.join(safedir, 'geodetic_in.nc'), ['latitude_in', 'longitude_in', 'elevation_in'])
+    replacenc(os.path.join(safedir, 'geodetic_io.nc'), ['latitude_io', 'longitude_io', 'elevation_io'])
 
-    subprocess.run(['zip', '-r', zipname, safename], cwd=_workdir)
+    # Drop the orphan pixels from S7-S9
+    for b in [7,8,9]:
+        for v in ['n', 'o']:
+            replacenc(os.path.join(safedir, f'S{b}_BT_i{v}.nc'), [f'S{b}_BT_i{v}', f'S{b}_exception_i{v}'])
+
+    # Make SLSTR-Lite zip file
+    subprocess.run(['zip', '-qr', zipname, safename], cwd=_workdir, check=True)
     shutil.rmtree(safedir)
+    s1 = os.path.getsize(filename) /1024/1024
+    s2 = os.path.getsize(os.path.join(_workdir, zipname)) /1024/1024
+    print(f'Compressed {s1:.1f}M to {s2:.1f}M ({100*s2/s1:.1f}%)')
     return os.path.join(_workdir, zipname)
 
 
@@ -193,18 +237,28 @@ if __name__ == '__main__':
     parser.add_argument('--prefix', default='.', help='Output directory prefix')
     args = parser.parse_args()
 
-
+    _history = datetime.datetime.now(datetime.UTC).strftime('  %Y-%m-%dT%H:%M:%SZ') + ": s3regrid.py"
+    time0 = time.monotonic()
+    nfile = 0
     for src in args.file:
         print(f'Processing {src}')
+        time1 = time.monotonic()
         spath = Path(src)
         n = args.cut_dirs + 1 if spath.is_absolute() else args.cut_dirs
         dst = Path(args.prefix).joinpath(*spath.parts[n:])
         try:
             f = processzip(src)
-            os.makedirs(dst.parent, exist_ok=True)
-            shutil.move(f, dst)
 
         except zipfile.BadZipFile as e:
             print(f'ERROR {e}: {src}')
 
+        else:
+            os.makedirs(dst.parent, exist_ok=True)
+            shutil.move(f, dst)
+            runtime = time.monotonic() - time1
+            print(f'Output {dst} time: {datetime.timedelta(seconds=runtime)}')
+            nfile += 1
+
+    runtime = time.monotonic() - time0
+    print(f'Processed {nfile}/{len(args.file)} files in {datetime.timedelta(seconds=runtime)}')
 

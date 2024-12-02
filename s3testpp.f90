@@ -1,5 +1,5 @@
 !--------------------------------------------------------------------------------------------
-!P+ s3testpp
+!P+
 ! NAME:
 !     s3testpp
 !
@@ -55,6 +55,20 @@
 !
 !P-
 !--------------------------------------------------------------------------------------------
+  SUBROUTINE handle_err(status)
+    USE netcdf
+    IMPLICIT NONE
+    ! -----------
+    ! Arguments
+    ! -----------
+    INTEGER, INTENT (IN) :: status
+
+    IF (status /= nf90_noerr) THEN
+      PRINT *, nf90_strerror(status)
+      STOP "Stopped"
+    END IF
+  END SUBROUTINE handle_err
+
 
 !------------------------------------------------------------------------------
   !S+
@@ -262,7 +276,7 @@ SUBROUTINE show_neighbourhood_stats(neighbourhood, title)
             distance_gt_10 = distance_gt_10 + 1
           END IF
         END IF
-        if (source == NULL_PIXEL_SOURCE) THEN
+        if (source == INVALID_PIXEL) THEN
           null_count = null_count + 1
         ELSE
           ! run integrity checks
@@ -278,12 +292,12 @@ SUBROUTINE show_neighbourhood_stats(neighbourhood, title)
           END IF
 
           ! values at each entry should be ordered by increasing squared distance, check this
-          IF (sqdist > neighbourhood%entries(col,row)%squared_distances(k)) THEN
+          IF (sqdist > neighbourhood%entries(col,row)%d(k)) THEN
             PRINT *, 'ERROR - distances in neighbourhood are out of order'
-            PRINT *, neighbourhood%entries(col,row)%squared_distances
+            PRINT *, neighbourhood%entries(col,row)%d
             STOP
           END IF
-          sqdist = neighbourhood%entries(col,row)%squared_distances(k)
+          sqdist = neighbourhood%entries(col,row)%d(k)
 
           IF (sqdist > MAX_NEIGHBOUR_DISTANCE*MAX_NEIGHBOUR_DISTANCE) THEN
             PRINT *, 'ERROR - distances in neighbourhood exceeds maximum'
@@ -377,7 +391,7 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, e
   ! ---------------
   ! Local Variables
   ! ---------------
-  INTEGER :: ir_width, ir_height, band, rad_ncid, status
+  INTEGER :: ir_width, ir_height, band
 
   CHARACTER(1) :: band_str
   CHARACTER(256) :: output_field_name
@@ -424,12 +438,12 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, e
       PRINT *, 'effective neighbourhood size', effective_k
       PRINT *, 'max distance (m)', MAX_NEIGHBOUR_DISTANCE
     END IF
-    CALL compute_scene_neighbourhood(view_type,scene_folder,neighbourhood_a,'a')
+    CALL compute_scene_neighbourhood(scene_folder, view_type, 'a', neighbourhood_a)
     IF (stats) THEN
       CALL show_neighbourhood_stats(neighbourhood_a, &
               'Neighbourhood A stats - view='//view_type)
     END IF
-    CALL compute_scene_neighbourhood(view_type,scene_folder,neighbourhood_ab,'b')
+    CALL compute_scene_neighbourhood(scene_folder, view_type, 'b', neighbourhood_ab)
     IF (stats) THEN
       CALL show_neighbourhood_stats(neighbourhood_ab, &
               'Neighbourhood B stats - view='//view_type)
@@ -441,9 +455,7 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, e
     END IF
   END IF
 
-  rad_ncid = safe_open(TRIM(scene_folder)//'/'//'S1_radiance_a'//view_type//'.nc')
-  fill_value = safe_get_real_attribute(rad_ncid,'S1_radiance_a'//view_type,'_FillValue')
-  status = nf90_close(rad_ncid)
+  fill_value = -32768
 
   DO band = 1,6
     WRITE(band_str,'(I1)') band
@@ -451,7 +463,7 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, e
 
     DO function_index = 1,4
       IF (band > 3) THEN
-        ! bands 4,5,6 should have data avaialble for both a and b stripes
+        ! bands 4,5,6 should have data available for both a and b stripes
         CALL process_scene_band(view_type,scene_folder,band,vis_output_radiance, &
                 neighbourhood_ab,effective_k,functions(function_index))
       ELSE
