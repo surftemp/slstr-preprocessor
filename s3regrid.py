@@ -251,10 +251,16 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('file', nargs='+', help='Input SLSTR zip file(s)')
     parser.add_argument('--cut-dirs', type=int, default=0, help='Cut this number of directory components')
-    parser.add_argument('--prefix', default='.', help='Output directory prefix')
+    parser.add_argument('--prefix', default='', help='Output directory prefix')
     parser.add_argument('--no-bstripe', dest='bstripe', action='store_false', help="Do not include b-stripe data in S4-S6")
     parser.add_argument('-s', '--standard-deviation', dest='chans', help='Channels for sub-pixel texture')
     args = parser.parse_args()
+
+    if args.prefix=='' and args.cut_dirs==0:
+        print('WARNING - Neither prefix or cut-dirs have been specified.')
+        print('This will result in the input zip file being overwritten.')
+        print('If this behaviour is intended run with --prefix=.')
+        sys.exit()
 
     # Do not include filename / path arguments in history as they can
     # be very long and are not useful to end users.

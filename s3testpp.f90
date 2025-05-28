@@ -460,15 +460,14 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, e
   DO band = 1,6
     WRITE(band_str,'(I1)') band
     WRITE(output_field_name, '("S",I1,"_radiance_i",A1)') band, view_type
-
     DO function_index = 1,4
       IF (band > 3) THEN
         ! bands 4,5,6 should have data available for both a and b stripes
-        CALL process_scene_band(view_type,scene_folder,band,vis_output_radiance, &
+        CALL process_scene_band(scene_folder,view_type,band,vis_output_radiance, &
                 neighbourhood_ab,effective_k,functions(function_index))
       ELSE
         ! bands 3,4,5 may only have the a stripe
-        CALL process_scene_band(view_type,scene_folder,band,vis_output_radiance, &
+        CALL process_scene_band(scene_folder,view_type,band,vis_output_radiance, &
                 neighbourhood_a,effective_k,functions(function_index))
       END IF
       vis_output_radiances(:,:,function_index) = vis_output_radiance
@@ -477,7 +476,6 @@ SUBROUTINE process_view(view_type, scene_folder, output_folder, simple, stats, e
     WHERE (vis_output_radiances == MISSING_R)
       vis_output_radiances = fill_value
     END WHERE
-
     CALL safe_write_out(Path_Join(output_folder,'S'//band_str//'_radiance_i'//view_type//'.nc'), &
       output_field_name,ir_width,ir_height,4,vis_output_radiances,fill_value,function_names)
   END DO
@@ -502,6 +500,11 @@ PROGRAM s3testpp
   stats = .false.
   effective_k = MAX_K_NEAREST_NEIGHBOURS
   max_distance = 10000
+
+  IF (COMMAND_ARGUMENT_COUNT() < 2) THEN
+    WRITE(*,*) 'usage: s3testpp src_path out_path [--simple] [--stats] [--effective_k K] [--max_distance DIST]'
+    STOP
+  END IF
 
   CALL GET_COMMAND_ARGUMENT(1,scene_folder)
   CALL GET_COMMAND_ARGUMENT(2,output_folder)
